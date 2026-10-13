@@ -43,3 +43,17 @@ window.addEventListener('message', function (event) {
     // service worker 处于未就绪状态时可能抛错，忽略即可，下一条还会再发
   }
 });
+
+// —— 第三步：加载"自动托管"控制器（运行在隔离世界）——
+// 为什么用动态 import()：
+//   manifest 里注册的 content script 是普通脚本、不能用静态 import。
+//   但在隔离世界里可以用动态 import() 加载"扩展内的 ES 模块"（需在
+//   web_accessible_resources 里登记）。这样托管各模块仍保持 ES Module 分层，
+//   不必把常量/逻辑抄一遍，符合"模块化 + 常量集中"的原则。
+(function loadAutopilot() {
+  const url = chrome.runtime.getURL('src/content/autopilot/controller.js');
+  // 托管默认是关闭的，加载进来也不会乱动；它会自己读 storage 决定要不要跑。
+  import(url).catch(() => {
+    // 加载失败不影响抓包/胜率主功能，忽略即可
+  });
+})();

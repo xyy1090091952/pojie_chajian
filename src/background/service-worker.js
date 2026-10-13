@@ -11,6 +11,8 @@
 
 import { CHANNEL, RUNTIME_MESSAGE, PANEL_MESSAGE } from '../common/constants.js';
 import { addRecord, getAll, clear } from '../data/message-store.js';
+import { extractGameState } from '../data/game-state.js';
+import { decide } from '../data/decision-engine.js';
 
 // 当前连接着的面板端口集合（面板可能开多个，用 Set 管理）
 const panelPorts = new Set();
@@ -20,17 +22,49 @@ if (chrome.sidePanel && chrome.sidePanel.setPanelBehavior) {
   chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});
 }
 
-// —— 1) 接收 content 脚本转发来的抓包数据 ——
-chrome.runtime.onMessage.addListener((message) => {
-  if (message && message.type === RUNTIME_MESSAGE.CAPTURE) {
-    // 存入数据层，拿到解析好牌的完整记录
-    const record = addRecord(message.record);
-    // 实时广播给所有打开的面板
-    broadcast({ type: PANEL_MESSAGE.NEW_RECORD, record });
+// —— 1) 接收 content 脚本转发来的消息 ——
+// 注意：GET_DECISION 需要【异步回传】结果，所以这个监听器里凡是要回传的分支，
+//       都要 return true，告诉 Chrome "sendResponse 稍后才调用，别提前关闭通道"。
+chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (!message) return false;
+
+  switch (message.type) {
+    // 1.1 抓到一条新网络数据：存起来 + 广播给面板
+    case RUNTIME_MESSAGE.CAPTURE: {
+      const record = addRecord(message.record);
+      broadcast({ type: PANEL_MESSAGE.NEW_RECORD, record });
+      return false; // 无需回传
+    }
+
+    // 1.2 托管请求决策：用当前全部数据抽局面 + 跑策略，把决策回传给内容脚本
+    case RUNTIME_MESSAGE.GET_DECISION: {
+      const decision = computeDecision(message.config || {});
+      sendResponse(decision);
+      return true; // 已（同步）回传，这里 computeDecision 是同步的，返回 true 更稳妥
+    }
+
+    // 1.3 托管执行了一个动作：转成面板消息，显示"最近动作"
+    case RUNTIME_MESSAGE.AUTOPILOT_ACTED: {
+      broadcast({ type: PANEL_MESSAGE.AUTOPILOT_ACTION, acted: message.acted });
+      return false;
+    }
+
+    default:
+      return false;
   }
-  // 不需要异步回传，返回 false 即可
-  return false;
 });
+
+/**
+ * 用"当前全部抓包数据"算一次托管决策。
+ *   数据管理层抽象：这里只负责"取数据 → 抽局面 → 交给决策引擎"，
+ *   具体怎么决策由 decision-engine 按档位路由，背景脚本不含扑克逻辑。
+ * @param {object} config {tier, opponentStyle}
+ * @returns {object} 决策引擎的标准结果 {ok, action, amount, reason, tier, equity}
+ */
+function computeDecision(config) {
+  const ctx = extractGameState(getAll()); // 抽出"最新一帧"的局面
+  return decide(ctx, config); // 交给决策引擎（内部先算胜率再按档位出动作）
+}
 
 // —— 2) 维护与面板的长连接 ——
 chrome.runtime.onConnect.addListener((port) => {

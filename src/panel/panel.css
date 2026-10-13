@@ -1,6 +1,5 @@
-/* 面板样式
- * 深色主题，突出两张"牌汇总"卡片。
- * 牌面统一用 .chip 展示，红桃/方块红色、黑桃/梅花黑色。
+/* 德州胜率助手 —— 极简深色主题
+ * 只为"展示胜率"服务：一张牌面 + 一个胜率圆环 + 几个数字。
  */
 
 * {
@@ -14,192 +13,331 @@ body {
   background: #14161a;
   color: #e6e6e6;
   font-size: 13px;
-  min-width: 420px;
+  min-width: 320px;
 }
 
-/* 顶部工具条 */
-.toolbar {
+/* 顶部标题条 */
+.topbar {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 10px 12px;
+  padding: 12px 14px;
   background: #1c1f26;
   border-bottom: 1px solid #2a2e37;
-  position: sticky;
-  top: 0;
-  z-index: 10;
 }
-.title {
-  font-weight: 600;
+.topbar__title {
+  font-weight: 700;
+  font-size: 15px;
 }
-.toolbar__actions {
+.topbar__status {
+  color: #7a828f;
+  font-size: 12px;
+}
+
+/* 对手风格选择条 */
+.stylebar {
   display: flex;
   align-items: center;
   gap: 8px;
+  padding: 10px 14px;
+  background: #171a20;
+  border-bottom: 1px solid #2a2e37;
 }
-.input {
-  background: #0f1114;
-  border: 1px solid #333a45;
+.stylebar__label {
+  color: #9aa3b0;
+  font-size: 12px;
+  flex: 0 0 auto;
+}
+.stylebar__select {
+  background: #262b34;
   color: #e6e6e6;
+  border: 1px solid #333a45;
   border-radius: 6px;
-  padding: 5px 8px;
-  width: 160px;
-}
-.checkbox {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  color: #b9c0cc;
-  white-space: nowrap;
-}
-.btn {
-  background: #2b6cff;
-  color: #fff;
-  border: none;
-  border-radius: 6px;
-  padding: 6px 12px;
+  padding: 4px 8px;
+  font-size: 13px;
   cursor: pointer;
+  flex: 0 0 auto;
 }
-.btn:hover {
-  background: #1f58d8;
+.stylebar__desc {
+  color: #6b7280;
+  font-size: 11px;
+  line-height: 1.4;
+  flex: 1 1 auto;
 }
 
-/* 两张汇总卡片 */
-.summary {
+/* 自动托管控制区 */
+.autopilot {
+  padding: 12px 14px;
+  background: #171a20;
+  border-bottom: 1px solid #2a2e37;
+}
+.autopilot__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.autopilot__title {
+  font-weight: 700;
+  font-size: 13px;
+  color: #e6e6e6;
+}
+.autopilot__hint {
+  font-weight: 400;
+  font-size: 11px;
+  color: #6b7280;
+}
+.autopilot__row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+}
+.autopilot__label {
+  color: #9aa3b0;
+  font-size: 12px;
+  flex: 0 0 auto;
+}
+.autopilot__desc {
+  color: #6b7280;
+  font-size: 11px;
+  line-height: 1.5;
+  margin-top: 6px;
+}
+
+/* 开关滑块（纯 CSS，用 checkbox 驱动） */
+.switch {
+  position: relative;
+  display: inline-block;
+  width: 42px;
+  height: 24px;
+  flex: 0 0 auto;
+}
+.switch input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+.switch__slider {
+  position: absolute;
+  inset: 0;
+  background: #333a45;
+  border-radius: 24px;
+  transition: background 0.2s;
+  cursor: pointer;
+}
+.switch__slider::before {
+  content: '';
+  position: absolute;
+  width: 18px;
+  height: 18px;
+  left: 3px;
+  top: 3px;
+  background: #fff;
+  border-radius: 50%;
+  transition: transform 0.2s;
+}
+.switch input:checked + .switch__slider {
+  background: #3ddc84;
+}
+.switch input:checked + .switch__slider::before {
+  transform: translateX(18px);
+}
+
+/* 最近动作展示 */
+.last-action {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  padding: 8px 10px;
+  background: #1c1f26;
+  border: 1px solid #2a2e37;
+  border-radius: 8px;
+}
+.last-action__badge {
+  flex: 0 0 auto;
+  background: #22303a;
+  color: #8fd0ff;
+  border-radius: 6px;
+  padding: 3px 8px;
+  font-size: 12px;
+  font-weight: 700;
+}
+.last-action__reason {
+  color: #9aa3b0;
+  font-size: 11px;
+  line-height: 1.4;
+  flex: 1 1 auto;
+}
+
+/* 空状态提示 */
+.empty {
+  color: #7a828f;
+  line-height: 1.6;
+  padding: 24px 16px;
+  text-align: center;
+}
+
+/* 主体 */
+.body {
+  padding: 14px;
+}
+
+/* 牌面区 */
+.hand {
+  background: #1c1f26;
+  border: 1px solid #2a2e37;
+  border-radius: 10px;
+  padding: 12px;
+  margin-bottom: 14px;
+}
+.hand__row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.hand__row + .hand__row {
+  margin-top: 10px;
+}
+.hand__label {
+  color: #9aa3b0;
+  width: 48px;
+  flex: 0 0 auto;
+}
+.hand__cards {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+/* 单张牌：白底扑克牌样式 */
+.card {
+  background: #fff;
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-weight: 800;
+  font-size: 15px;
+  min-width: 38px;
+  text-align: center;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
+}
+.card--empty {
+  color: #556;
+}
+
+/* 胜率圆环区 */
+.gauge-wrap {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  padding: 6px 4px 16px;
+}
+/* 用 conic-gradient 画圆环，--pct 由 JS 写入；颜色也由 JS 按高低改 */
+.gauge {
+  --pct: 0;
+  --color: #3ddc84;
+  position: relative;
+  width: 120px;
+  height: 120px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: conic-gradient(var(--color) calc(var(--pct) * 1%), #2a2e37 0);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+}
+.gauge::before {
+  content: '';
+  position: absolute;
+  inset: 10px;
+  border-radius: 50%;
+  background: #14161a;
+}
+.gauge__value {
+  position: relative;
+  font-size: 30px;
+  font-weight: 800;
+  color: #fff;
+}
+.gauge__label {
+  position: relative;
+  font-size: 12px;
+  color: #9aa3b0;
+  margin-top: 2px;
+}
+
+/* 胜平负拆分 */
+.breakdown {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.bd-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #c5ccd6;
+  font-size: 14px;
+}
+.bd-row b {
+  color: #fff;
+  min-width: 40px;
+  text-align: right;
+  display: inline-block;
+}
+.dot {
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  display: inline-block;
+}
+.dot--win { background: #3ddc84; }
+.dot--tie { background: #ffc857; }
+.dot--lose { background: #ff6b6b; }
+
+/* 两个关键信息格 */
+.info {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 10px;
-  padding: 12px;
+  margin-bottom: 12px;
 }
-.card-box {
+.info__cell {
   background: #1c1f26;
   border: 1px solid #2a2e37;
   border-radius: 10px;
-  padding: 10px;
-  min-height: 72px;
+  padding: 10px 12px;
 }
-.card-box__head {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  color: #b9c0cc;
-  margin-bottom: 8px;
-  font-weight: 600;
-}
-.badge {
-  background: #2a2e37;
-  border-radius: 10px;
-  padding: 1px 8px;
+.info__label {
   font-size: 12px;
+  color: #9aa3b0;
+  margin-bottom: 4px;
 }
-.cards {
+.info__value {
+  font-weight: 700;
+  font-size: 16px;
+}
+
+/* 听牌提示 */
+.draws {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
+  margin-bottom: 12px;
 }
-
-/* 单张牌的小芯片 */
-.chip {
-  background: #fff;
-  border-radius: 6px;
-  padding: 4px 8px;
-  font-weight: 700;
-  min-width: 34px;
-  text-align: center;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
-}
-
-/* 泄露提示 */
-.leak-hint {
-  margin: 0 12px 10px;
-  padding: 10px 12px;
-  border-radius: 8px;
-  background: #3a1d1d;
-  border: 1px solid #a33;
-  color: #ffb4b4;
-  line-height: 1.5;
-}
-
-/* 原始日志 */
-.log {
-  padding: 0 12px 16px;
-}
-.log__head {
-  display: flex;
-  justify-content: space-between;
-  color: #b9c0cc;
-  padding: 6px 0;
-  font-weight: 600;
-}
-.muted {
-  color: #7a828f;
-  font-weight: 400;
-}
-.log__list {
-  list-style: none;
-}
-.log-item {
-  background: #1c1f26;
-  border: 1px solid #2a2e37;
-  border-radius: 8px;
-  padding: 8px 10px;
-  margin-bottom: 6px;
-}
-.log-item__meta {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-  margin-bottom: 4px;
-  flex-wrap: wrap;
-}
-.tag {
-  border-radius: 4px;
-  padding: 1px 6px;
-  font-size: 11px;
-}
-.tag--in {
-  background: #10361f;
-  color: #7be3a0;
-}
-.tag--out {
-  background: #2a2334;
-  color: #c69bff;
-}
-.tag--transport {
+.draw-tag {
   background: #22303a;
   color: #8fd0ff;
-}
-.log-item__url {
-  color: #7a828f;
-  font-size: 11px;
-  word-break: break-all;
-}
-.log-item__cards {
-  display: flex;
-  gap: 6px;
-  flex-wrap: wrap;
-  margin-top: 6px;
-}
-.log-item__payload {
-  margin-top: 6px;
-  background: #0f1114;
   border-radius: 6px;
-  padding: 8px;
-  max-height: 160px;
-  overflow: auto;
-  white-space: pre-wrap;
-  word-break: break-all;
-  color: #c5ccd6;
-  font-family: 'SF Mono', Menlo, monospace;
+  padding: 4px 10px;
+  font-size: 12px;
+}
+
+/* 底部说明 */
+.note {
+  color: #6b7280;
   font-size: 11px;
-  display: none; /* 默认折叠，点击展开 */
-}
-.log-item__payload.open {
-  display: block;
-}
-.card-label {
-  font-size: 10px;
-  color: #9aa3b0;
-  display: block;
-  margin-top: 2px;
+  line-height: 1.6;
+  text-align: center;
 }

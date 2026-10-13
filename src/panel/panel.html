@@ -3,55 +3,104 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>德州数据审计器</title>
+    <title>德州胜率助手</title>
     <link rel="stylesheet" href="panel.css" />
   </head>
   <body>
-    <!-- 顶部工具条 -->
-    <header class="toolbar">
-      <span class="title">🎲 德州数据审计器</span>
-      <div class="toolbar__actions">
-        <!-- 关键词过滤：只看包含某字样的消息 -->
-        <input id="filterInput" class="input" placeholder="过滤关键词，如 hole / board" />
-        <!-- 只看服务器下发的数据（查泄露主要看这个） -->
-        <label class="checkbox"><input type="checkbox" id="inboundOnly" /> 只看服务器下发</label>
-        <button id="clearBtn" class="btn">清空</button>
-      </div>
+    <!-- 顶部标题条（极简） -->
+    <header class="topbar">
+      <span class="topbar__title">♠ 胜率助手</span>
+      <span id="status" class="topbar__status">等待牌局…</span>
     </header>
 
-    <!-- 两张重点汇总卡片：底牌 / 公共牌·未翻开牌 -->
-    <section class="summary">
-      <div class="card-box">
-        <div class="card-box__head">
-          <span>🂠 抓到的底牌（hole）</span>
-          <span id="holeCount" class="badge">0</span>
+    <!-- 对手风格选择：决定"假设对手手里有多强的牌"，直接影响胜率高低。 -->
+    <div class="stylebar">
+      <label for="opponentStyle" class="stylebar__label">对手牌力</label>
+      <select id="opponentStyle" class="stylebar__select"></select>
+      <span id="styleDesc" class="stylebar__desc"></span>
+    </div>
+
+    <!-- 自动托管控制区：总开关 + 策略档位 + 最近动作。 -->
+    <section class="autopilot">
+      <div class="autopilot__head">
+        <div class="autopilot__title">
+          自动托管
+          <span class="autopilot__hint">（打开后插件会自动替你出牌）</span>
         </div>
-        <!-- 若这里出现了"别人"的底牌，说明服务器把隐藏信息下发到了客户端 = 泄露 -->
-        <div id="holeCards" class="cards"></div>
+        <!-- 开关：用 checkbox 做成滑块样式，状态存 chrome.storage -->
+        <label class="switch">
+          <input type="checkbox" id="autopilotEnabled" />
+          <span class="switch__slider"></span>
+        </label>
       </div>
 
-      <div class="card-box">
-        <div class="card-box__head">
-          <span>🂡 公共牌 / 未翻开牌（board·deck）</span>
-          <span id="boardCount" class="badge">0</span>
-        </div>
-        <div id="boardCards" class="cards"></div>
+      <div class="autopilot__row">
+        <label for="strategyTier" class="autopilot__label">策略档位</label>
+        <select id="strategyTier" class="stylebar__select"></select>
+      </div>
+      <p id="tierDesc" class="autopilot__desc"></p>
+
+      <!-- 最近一次自动动作（没动作时隐藏） -->
+      <div id="lastAction" class="last-action" hidden>
+        <span class="last-action__badge" id="lastActionBadge">—</span>
+        <span class="last-action__reason" id="lastActionReason"></span>
       </div>
     </section>
 
-    <!-- 泄露提示条：只有在抓到可疑数据时才显示 -->
-    <div id="leakHint" class="leak-hint" hidden></div>
 
-    <!-- 原始消息列表 -->
-    <main class="log">
-      <div class="log__head">
-        <span>原始消息流</span>
-        <span id="totalCount" class="muted">共 0 条</span>
-      </div>
-      <ul id="logList" class="log__list"></ul>
+    <!-- 没有可算数据时显示的提示 -->
+    <div id="empty" class="empty">
+      进入牌桌、拿到你的两张底牌后，这里会自动显示胜率。
+    </div>
+
+    <!-- 胜率主体（有数据时才显示） -->
+    <main id="body" class="body" hidden>
+      <!-- 你的牌 + 公共牌 -->
+      <section class="hand">
+        <div class="hand__row">
+          <span class="hand__label">你的牌</span>
+          <div id="myCards" class="hand__cards"></div>
+        </div>
+        <div class="hand__row">
+          <span class="hand__label">公共牌</span>
+          <div id="boardCards" class="hand__cards"></div>
+        </div>
+      </section>
+
+      <!-- 大号胜率圆环 + 胜平负 -->
+      <section class="gauge-wrap">
+        <div id="gauge" class="gauge">
+          <div id="winValue" class="gauge__value">--%</div>
+          <div class="gauge__label">胜率</div>
+        </div>
+        <div class="breakdown">
+          <div class="bd-row"><span class="dot dot--win"></span>胜 <b id="win">--</b>%</div>
+          <div class="bd-row"><span class="dot dot--tie"></span>平 <b id="tie">--</b>%</div>
+          <div class="bd-row"><span class="dot dot--lose"></span>负 <b id="lose">--</b>%</div>
+        </div>
+      </section>
+
+      <!-- 两个关键信息 -->
+      <section class="info">
+        <div class="info__cell">
+          <div class="info__label">当前牌型</div>
+          <div id="handName" class="info__value">—</div>
+        </div>
+        <div class="info__cell">
+          <div class="info__label">对手人数</div>
+          <div id="opponents" class="info__value">—</div>
+        </div>
+      </section>
+
+      <!-- 听牌提示（没有则隐藏） -->
+      <div id="draws" class="draws" hidden></div>
+
+      <!-- 诚实说明：让你知道这个数字怎么来的 -->
+      <p class="note">
+        <span id="noteStyle">按"对手标准牌力"估算</span>（<span id="samples">—</span> 次模拟），对手真实打法未知，仅供参考。
+      </p>
     </main>
 
-    <!-- 用 type=module 以便 import 数据层/常量 -->
     <script type="module" src="panel.js"></script>
   </body>
 </html>

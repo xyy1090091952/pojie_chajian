@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "德州数据审计器",
+  "name": "德州胜率助手",
   "version": "1.0.0",
-  "description": "测试用：审计浏览器与德州服务器之间的网络数据，检测是否存在底牌/未翻开牌等隐藏信息被下发到客户端（信息泄露）的情况。",
+  "description": "只用你本人可见的数据（你的底牌 + 已翻公共牌 + 存活对手数）实时估算胜率，等价于 PokerStove / Equilab 这类公开胜率计算器。",
 
   "permissions": ["storage", "sidePanel"],
 
@@ -24,13 +24,20 @@
 
   "web_accessible_resources": [
     {
-      "resources": ["src/inject/interceptor.js"],
+      "resources": [
+        "src/inject/interceptor.js",
+        "src/content/autopilot/controller.js",
+        "src/content/autopilot/turn-detector.js",
+        "src/content/autopilot/action-executor.js",
+        "src/content/autopilot/dom-locator.js",
+        "src/common/constants.js"
+      ],
       "matches": ["https://47.243.178.16/*"]
     }
   ],
 
   "action": {
-    "default_title": "打开德州数据审计器"
+    "default_title": "打开德州胜率助手"
   },
 
   "side_panel": {
