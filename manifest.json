@@ -1,0 +1,39 @@
+{
+  "manifest_version": 3,
+  "name": "德州数据审计器",
+  "version": "1.0.0",
+  "description": "测试用：审计浏览器与德州服务器之间的网络数据，检测是否存在底牌/未翻开牌等隐藏信息被下发到客户端（信息泄露）的情况。",
+
+  "permissions": ["storage", "sidePanel"],
+
+  "host_permissions": ["https://47.243.178.16/*"],
+
+  "background": {
+    "service_worker": "src/background/service-worker.js",
+    "type": "module"
+  },
+
+  "content_scripts": [
+    {
+      "matches": ["https://47.243.178.16/*"],
+      "js": ["src/content/content.js"],
+      "run_at": "document_start",
+      "all_frames": true
+    }
+  ],
+
+  "web_accessible_resources": [
+    {
+      "resources": ["src/inject/interceptor.js"],
+      "matches": ["https://47.243.178.16/*"]
+    }
+  ],
+
+  "action": {
+    "default_title": "打开德州数据审计器"
+  },
+
+  "side_panel": {
+    "default_path": "src/panel/panel.html"
+  }
+}

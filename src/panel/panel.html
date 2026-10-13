@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>德州数据审计器</title>
+    <link rel="stylesheet" href="panel.css" />
+  </head>
+  <body>
+    <!-- 顶部工具条 -->
+    <header class="toolbar">
+      <span class="title">🎲 德州数据审计器</span>
+      <div class="toolbar__actions">
+        <!-- 关键词过滤：只看包含某字样的消息 -->
+        <input id="filterInput" class="input" placeholder="过滤关键词，如 hole / board" />
+        <!-- 只看服务器下发的数据（查泄露主要看这个） -->
+        <label class="checkbox"><input type="checkbox" id="inboundOnly" /> 只看服务器下发</label>
+        <button id="clearBtn" class="btn">清空</button>
+      </div>
+    </header>
+
+    <!-- 两张重点汇总卡片：底牌 / 公共牌·未翻开牌 -->
+    <section class="summary">
+      <div class="card-box">
+        <div class="card-box__head">
+          <span>🂠 抓到的底牌（hole）</span>
+          <span id="holeCount" class="badge">0</span>
+        </div>
+        <!-- 若这里出现了"别人"的底牌，说明服务器把隐藏信息下发到了客户端 = 泄露 -->
+        <div id="holeCards" class="cards"></div>
+      </div>
+
+      <div class="card-box">
+        <div class="card-box__head">
+          <span>🂡 公共牌 / 未翻开牌（board·deck）</span>
+          <span id="boardCount" class="badge">0</span>
+        </div>
+        <div id="boardCards" class="cards"></div>
+      </div>
+    </section>
+
+    <!-- 泄露提示条：只有在抓到可疑数据时才显示 -->
+    <div id="leakHint" class="leak-hint" hidden></div>
+
+    <!-- 原始消息列表 -->
+    <main class="log">
+      <div class="log__head">
+        <span>原始消息流</span>
+        <span id="totalCount" class="muted">共 0 条</span>
+      </div>
+      <ul id="logList" class="log__list"></ul>
+    </main>
+
+    <!-- 用 type=module 以便 import 数据层/常量 -->
+    <script type="module" src="panel.js"></script>
+  </body>
+</html>
