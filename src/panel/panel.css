@@ -211,6 +211,29 @@ body {
   flex: 1 1 auto;
 }
 
+/* "接下来打算做"预告：用暖色(橙黄)和左侧竖条，和蓝色的"最近动作"一眼区分开，
+   提醒你"这是还没发生、即将执行的操作"，看到后来得及接管。 */
+.last-action--plan {
+  border-color: #4a3b1e;
+  background: #241f14;
+  border-left: 3px solid #e0a73a;
+}
+.last-action__badge--plan {
+  background: #3a2f14;
+  color: #ffcf6b;
+}
+/* 预告在倒计时/等待点击期间，徽标轻微呼吸闪动，暗示"马上要动手了"。
+   用 prefers-reduced-motion 包裹：用户若系统关了动效就不闪，尊重无障碍设置。 */
+@media (prefers-reduced-motion: no-preference) {
+  .last-action--plan .last-action__badge--plan {
+    animation: plan-pulse 1.1s ease-in-out infinite;
+  }
+}
+@keyframes plan-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
+}
+
 /* 空状态提示 */
 .empty {
   color: #7a828f;

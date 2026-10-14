@@ -26,6 +26,7 @@ export const CHANNEL = {
 export const RUNTIME_MESSAGE = {
   CAPTURE: 'CAPTURE', // 抓到一条新的网络数据
   GET_DECISION: 'GET_DECISION', // 托管：轮到我了，向后台要一个"该做什么动作"的决策
+  AUTOPILOT_PLAN: 'AUTOPILOT_PLAN', // 托管：决策已出、但还没动手（在拟人延迟里），先把"打算怎么做"预告给面板
   AUTOPILOT_ACTED: 'AUTOPILOT_ACTED', // 托管：已经执行了一个动作，上报给后台（再转给面板展示）
 };
 
@@ -35,6 +36,7 @@ export const PANEL_MESSAGE = {
   SNAPSHOT: 'SNAPSHOT', // 后台回传的全部数据
   NEW_RECORD: 'NEW_RECORD', // 后台广播：来了一条新数据
   CLEAR: 'CLEAR', // 清空
+  AUTOPILOT_PLAN: 'AUTOPILOT_PLAN', // 后台广播：托管"接下来打算做"的预告（面板显示在动手之前）
   AUTOPILOT_ACTION: 'AUTOPILOT_ACTION', // 后台广播：托管刚刚执行了某个动作（面板显示"最近动作"）
 };
 
@@ -265,6 +267,85 @@ export function getStrategyTier(tierId) {
   );
 }
 
+// 整体打法倾向：控制“愿不愿意入池/跟注/半诈唬”，不直接放大下注金额。
+//   这些参数只由复杂策略读取；简单策略保持原逻辑，避免两个档位互相污染。
+export const AGGRESSION_PROFILES = [
+  {
+    id: 'cautious',
+    label: '稳健',
+    desc: '提高入池和价值下注门槛，关闭主动半诈唬，波动更小。',
+    decision: {
+      thresholdShift: 2,
+      preflopOddsShift: -4,
+      valueGateShift: 3,
+      allowSemiBluff: false,
+    },
+  },
+  {
+    id: 'balanced',
+    label: '均衡',
+    desc: '保持当前复杂策略的标准门槛，兼顾价值下注与合理施压。',
+    decision: {
+      thresholdShift: 0,
+      preflopOddsShift: 0,
+      valueGateShift: 0,
+      allowSemiBluff: true,
+    },
+  },
+  {
+    id: 'aggressive',
+    label: '激进',
+    desc: '适度放宽入池和价值下注门槛，并保留半诈唬机会。',
+    decision: {
+      thresholdShift: -2,
+      preflopOddsShift: 5,
+      valueGateShift: -4,
+      allowSemiBluff: true,
+    },
+  },
+];
+
+export const DEFAULT_AGGRESSION_PROFILE = 'balanced';
+
+export function getAggressionProfile(profileId) {
+  return (
+    AGGRESSION_PROFILES.find((profile) => profile.id === profileId) ||
+    AGGRESSION_PROFILES.find((profile) => profile.id === DEFAULT_AGGRESSION_PROFILE)
+  );
+}
+
+// 大牌下注方式：只作用于“强起手/三条及以上”等明确的价值下注。
+//   半诈唬、保护下注和普通牌仍保持固定安全上限，避免“最大化”变成误全下。
+export const VALUE_BET_PROFILES = [
+  {
+    id: 'standard',
+    label: '标准',
+    desc: '按常规尺度价值下注；强牌最多投入约 50%，超强牌最多约 75% 筹码。',
+    decision: { sizeMultiplier: 1, strongStackCap: 0.5, monsterStackCap: 0.75 },
+  },
+  {
+    id: 'pressure',
+    label: '强势',
+    desc: '大牌下注约放大 25%；强牌最多约 65%，超强牌最多约 85% 筹码。',
+    decision: { sizeMultiplier: 1.25, strongStackCap: 0.65, monsterStackCap: 0.85 },
+  },
+  {
+    id: 'maximize',
+    label: '最大化',
+    desc: '大牌下注约放大 50%；强牌最多约 80%，超强牌最多约 95% 筹码。',
+    decision: { sizeMultiplier: 1.5, strongStackCap: 0.8, monsterStackCap: 0.95 },
+  },
+];
+
+export const DEFAULT_VALUE_BET_PROFILE = 'standard';
+
+export function getValueBetProfile(profileId) {
+  return (
+    VALUE_BET_PROFILES.find((profile) => profile.id === profileId) ||
+    VALUE_BET_PROFILES.find((profile) => profile.id === DEFAULT_VALUE_BET_PROFILE)
+  );
+}
+
 // 托管运行参数：集中管理"自动打牌"的节奏与安全阀。
 export const AUTOPILOT = {
   // 托管总开关的默认值：默认【关闭】。必须用户在面板上手动打开才会自动动作，
@@ -305,22 +386,34 @@ export const AUTOPILOT = {
 // 匹配策略（按优先级）：
 //   1) 先按 selectors 里的 CSS 选择器找（最精确，确认站点结构后在这里补）；
 //   2) 找不到就退而求其次：遍历页面上的 <button>，看它的文字是否包含 textIncludes 里的词。
-// 注意：selectors 现在先留空/占位，等用浏览器核对目标站真实 DOM 后再填精确值。
+//
+// 下面的 selectors 已用测试账号登录目标站（River，47.243.178.16）核对过真实 DOM：
+//   - 底部动作区容器 class = ".table-action-zone"
+//   - 跟注按钮 class 含 "is-call"（完整：button primary-action is-call）
+//   - 加注按钮 class 含 "raise-trigger"（完整：button dark raise-trigger）
+//   - 弃牌按钮只有通用 class "button"、没有专属类，所以不写精确选择器、只靠文字"弃牌"兜底
+//   - 过牌（check）本次牌局没出现（当时面前有下注、只能跟注），同样先靠文字兜底
 export const ACTION_BUTTON_RULES = {
   [POKER_ACTION.FOLD]: {
-    selectors: [], // 例如：['.btn-fold', '[data-action="fold"]']，待核对后补
+    // 弃牌按钮无专属 class（和别的按钮都叫 .button），精确选择器难以一意区分，
+    //   直接交给文字兜底"弃牌"更稳，这里保持为空。
+    selectors: [],
     textIncludes: ['弃牌', 'fold', 'Fold'],
   },
   [POKER_ACTION.CHECK]: {
+    // 过牌按钮本次未观察到（局面是"要跟注"），暂不写精确选择器，靠文字兜底。
     selectors: [],
     textIncludes: ['过牌', 'check', 'Check'],
   },
   [POKER_ACTION.CALL]: {
-    selectors: [],
+    // 跟注按钮：River 用 .is-call 做专属标记（限定在动作区内，避免误伤别处）。
+    selectors: ['.table-action-zone button.is-call'],
     textIncludes: ['跟注', 'call', 'Call'],
   },
   [POKER_ACTION.RAISE]: {
-    selectors: [],
+    // 加注按钮：River 用 .raise-trigger 做专属标记。
+    //   注意它是"先展开操作条、再点一次提交"的两段式按钮，展开逻辑在执行器里处理。
+    selectors: ['.table-action-zone button.raise-trigger'],
     textIncludes: ['加注', '下注', 'raise', 'Raise', 'bet', 'Bet'],
   },
 };
@@ -333,34 +426,46 @@ export const TURN_INDICATOR_RULES = {
 };
 
 // 「加注金额输入框」识别规则：决策是"加注"时，要先把金额填进这个框，再点加注按钮。
-//   不同站点可能用 number / range(滑块) / text 输入框，这里都兼容；
-//   selectors 先留空，核对真实 DOM 后可补精确值（最优先）。
+//   已核对目标站（River）真实 DOM：
+//     - 金额输入框是 <input type="text" inputmode="numeric" aria-label="加注至金额">，
+//       它在"加注操作条"浮层(.raise-popover)里，且该浮层是点击加注按钮后才出现（见执行器两段式逻辑）。
+//     - 浮层里还有一个 <input type="range" class="raise-slider"> 滑块，它默认值可能停在 0 或最大，
+//       【绝对不能】拿它当金额框去填——所以兜底里特意【不含 range】，只认 text / number，防误全下。
 export const BET_INPUT_RULES = {
-  selectors: [], // 例如：['input.bet-amount', '[data-role="raise-input"]']，待核对后补
-  // 兜底：按 input 的 type 去找（优先 number，其次滑块 range，再次普通 text）。
-  fallbackInputTypes: ['number', 'range', 'text'],
+  // 精确优先：aria-label 命名最稳；再加 .raise-popover 下的文本框做备选。
+  selectors: [
+    'input[aria-label="加注至金额"]',
+    '.raise-popover input[inputmode="numeric"]',
+    '.raise-popover input[type="text"]',
+  ],
+  // 兜底：按 input 的 type 去找。只认 number / text，【刻意排除 range 滑块】以防误全下。
+  fallbackInputTypes: ['number', 'text'],
 };
 
 // 「开始下一手 / 开局」按钮识别规则：房主需要点这个按钮才能进下一局。
 //   和动作按钮同一套匹配策略：先 selectors 精确找，找不到按文字兜底。
-//   文案候选尽量覆盖常见写法（开始、下一局、再来一局、Start、Next 等）。
+//   已核对目标站（River）：局间推进按钮文字是"下一手"，开新局是"开始发牌"。
+//
+//   ⚠️ 血泪教训：这里【绝对不能】放"开始 / start / 重新开局 / 继续"这类过宽的词！
+//   因为页面上常驻着"重新开始练习""重新开局"等【重置整局】的按钮，它们文字里也含"开始"，
+//   英文 "restart" 里也含 "start" —— 一旦兜底命中，牌局进行中就会被反复误点重开。
+//   所以：① textIncludes 只留"推进下一局"的精准词；
+//        ② 再加 excludeText 排除闸，凡按钮含"重新/重开/重置/restart/reset"一律不认（防误点重置）。
 export const NEXT_HAND_BUTTON_RULES = {
-  selectors: [], // 例如：['[data-action="start"]', '.btn-start-game']，待核对后补
+  selectors: [], // River 局间/开局按钮无稳定专属 class，靠下方文字兜底命中"下一手/开始发牌"
   textIncludes: [
     '开始下一手',
-    '开始游戏',
-    '开始',
+    '开始发牌',
     '下一手',
     '下一局',
     '再来一局',
-    '继续',
-    'start',
-    'Start',
-    'next',
-    'Next',
+    'next hand',
+    'Next Hand',
     'deal',
     'Deal',
   ],
+  // 排除闸：按钮文字只要含这些词，就【不】当作"下一手"（防误点"重新开始练习/重新开局"等重置按钮）。
+  excludeText: ['重新', '重开', '重置', 'restart', 'reset'],
 };
 
 // 托管状态在 chrome.storage 里的键名（持久化用）。集中成常量，避免各处拼错字符串。
@@ -368,5 +473,7 @@ export const STORAGE_KEYS = {
   AUTOPILOT_ENABLED: 'autopilot_enabled', // 托管开关（true/false）
   STRATEGY_TIER: 'autopilot_strategy_tier', // 选中的策略档位 id
   OPPONENT_STYLE: 'autopilot_opponent_style', // 选中的对手牌力风格 id（决策与胜率共用）
+  AGGRESSION_PROFILE: 'autopilot_aggression_profile', // 整体打法：稳健/均衡/激进
+  VALUE_BET_PROFILE: 'autopilot_value_bet_profile', // 大牌下注：标准/强势/最大化
   AUTO_NEXT_HAND: 'autopilot_auto_next_hand', // 房主：自动开始下一手（true/false）
 };

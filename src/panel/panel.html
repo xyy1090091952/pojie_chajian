@@ -40,6 +40,17 @@
       </div>
       <p id="tierDesc" class="autopilot__desc"></p>
 
+      <div class="autopilot__row">
+        <label for="aggressionProfile" class="autopilot__label">打法倾向</label>
+        <select id="aggressionProfile" class="stylebar__select"></select>
+      </div>
+
+      <div class="autopilot__row">
+        <label for="valueBetProfile" class="autopilot__label">大牌下注</label>
+        <select id="valueBetProfile" class="stylebar__select"></select>
+      </div>
+      <p id="profileDesc" class="autopilot__desc"></p>
+
       <!-- 房主专用开关：局间自动点"开始下一手"，避免卡在两局之间。
            只有托管总开关打开时才生效，所以默认开着也安全。 -->
       <div class="autopilot__row autopilot__row--switch">
@@ -51,6 +62,12 @@
           <input type="checkbox" id="autoNextHand" />
           <span class="switch__slider"></span>
         </label>
+      </div>
+
+      <!-- 接下来打算做（动手之前的预告，没预告时隐藏） -->
+      <div id="nextPlan" class="last-action last-action--plan" hidden>
+        <span class="last-action__badge last-action__badge--plan" id="nextPlanBadge">—</span>
+        <span class="last-action__reason" id="nextPlanReason"></span>
       </div>
 
       <!-- 最近一次自动动作（没动作时隐藏） -->

@@ -58,18 +58,30 @@ function textOf(el) {
 
 /**
  * 按规则找"某个动作"的按钮。
- * @param {object} rule   单个动作的规则：{ selectors: string[], textIncludes: string[] }
+ * @param {object} rule   单个动作的规则：{ selectors: string[], textIncludes: string[], excludeText?: string[] }
+ *   - excludeText：排除闸（可选）。按钮可见文字只要含其中任一词，就【不】算命中。
+ *     用途：防止把"重新开始/重新开局/restart"这类重置按钮误认成"下一手"。
  * @param {Document|Element} [root=document] 搜索根（默认整页）
  * @returns {Element|null} 找到的"可点"按钮；找不到返回 null
  */
 export function findActionButton(rule, root = document) {
   if (!rule) return null;
 
+  // 排除词统一转小写，供两条匹配路径复用（精确选择器 & 文字兜底都要过这道闸）。
+  const excludes = (rule.excludeText || []).map((w) => String(w).toLowerCase());
+  // 小工具：这个元素的文字是否命中了"排除词"（命中则应被排除）。
+  const isExcluded = (el) => {
+    if (excludes.length === 0) return false;
+    const t = textOf(el).toLowerCase();
+    return excludes.some((w) => t.includes(w));
+  };
+
   // 1) 先按 CSS 选择器找（最精确）。核对真实 DOM 后在 constants.js 里补 selectors。
   for (const sel of rule.selectors || []) {
     try {
       const el = root.querySelector(sel);
-      if (el && isActionable(el)) return el;
+      // 即使选择器命中，也要过"排除闸"：防止精确选择器恰好选到重置类按钮。
+      if (el && isActionable(el) && !isExcluded(el)) return el;
     } catch {
       // 选择器写错也不让整体崩，继续试下一个
     }
@@ -83,6 +95,7 @@ export function findActionButton(rule, root = document) {
     if (!isActionable(el)) continue;
     const txt = textOf(el).toLowerCase();
     if (!txt) continue;
+    if (isExcluded(el)) continue; // 命中排除词 => 跳过（如"重新开始练习"）
     if (words.some((w) => txt.includes(w))) return el;
   }
   return null;

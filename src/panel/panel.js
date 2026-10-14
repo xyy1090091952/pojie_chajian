@@ -22,6 +22,12 @@ import {
   STRATEGY_TIERS,
   DEFAULT_STRATEGY_TIER,
   getStrategyTier,
+  AGGRESSION_PROFILES,
+  DEFAULT_AGGRESSION_PROFILE,
+  getAggressionProfile,
+  VALUE_BET_PROFILES,
+  DEFAULT_VALUE_BET_PROFILE,
+  getValueBetProfile,
   AUTOPILOT,
   STORAGE_KEYS,
 } from '../common/constants.js';
@@ -47,9 +53,15 @@ const dom = {
   autoNextHand: document.getElementById('autoNextHand'), // 房主：自动开始下一手开关
   strategyTier: document.getElementById('strategyTier'), // 策略档位下拉
   tierDesc: document.getElementById('tierDesc'), // 档位说明
+  aggressionProfile: document.getElementById('aggressionProfile'), // 整体打法倾向
+  valueBetProfile: document.getElementById('valueBetProfile'), // 大牌价值下注力度
+  profileDesc: document.getElementById('profileDesc'), // 两项策略旋钮的说明
   lastAction: document.getElementById('lastAction'), // 最近动作容器
   lastActionBadge: document.getElementById('lastActionBadge'), // 动作徽标（跟注/弃牌…）
   lastActionReason: document.getElementById('lastActionReason'), // 动作理由
+  nextPlan: document.getElementById('nextPlan'), // "接下来打算做"预告容器
+  nextPlanBadge: document.getElementById('nextPlanBadge'), // 预告徽标
+  nextPlanReason: document.getElementById('nextPlanReason'), // 预告理由
   empty: document.getElementById('empty'),
   body: document.getElementById('body'),
   myCards: document.getElementById('myCards'),
@@ -103,6 +115,12 @@ function initAutopilot() {
   dom.strategyTier.innerHTML = STRATEGY_TIERS.map(
     (t) => `<option value="${t.id}"${t.available ? '' : ' disabled'}>${t.label}</option>`
   ).join('');
+  dom.aggressionProfile.innerHTML = AGGRESSION_PROFILES.map(
+    (profile) => `<option value="${profile.id}">${profile.label}</option>`
+  ).join('');
+  dom.valueBetProfile.innerHTML = VALUE_BET_PROFILES.map(
+    (profile) => `<option value="${profile.id}">${profile.label}</option>`
+  ).join('');
 
   // 2) 从 storage 读回上次的配置，回填到界面（没存过就用默认值）。
   chrome.storage.local.get(
@@ -110,6 +128,8 @@ function initAutopilot() {
       STORAGE_KEYS.AUTOPILOT_ENABLED,
       STORAGE_KEYS.STRATEGY_TIER,
       STORAGE_KEYS.OPPONENT_STYLE,
+      STORAGE_KEYS.AGGRESSION_PROFILE,
+      STORAGE_KEYS.VALUE_BET_PROFILE,
       STORAGE_KEYS.AUTO_NEXT_HAND,
     ],
     (cfg) => {
@@ -122,11 +142,20 @@ function initAutopilot() {
       let tier = cfg[STORAGE_KEYS.STRATEGY_TIER] ?? DEFAULT_STRATEGY_TIER;
       const tierConf = getStrategyTier(tier);
       if (!tierConf.available) tier = DEFAULT_STRATEGY_TIER;
+      const aggression = getAggressionProfile(
+        cfg[STORAGE_KEYS.AGGRESSION_PROFILE] ?? DEFAULT_AGGRESSION_PROFILE
+      ).id;
+      const valueBet = getValueBetProfile(
+        cfg[STORAGE_KEYS.VALUE_BET_PROFILE] ?? DEFAULT_VALUE_BET_PROFILE
+      ).id;
 
       dom.autopilotEnabled.checked = Boolean(enabled);
       dom.autoNextHand.checked = Boolean(autoNext);
       dom.strategyTier.value = tier;
+      dom.aggressionProfile.value = aggression;
+      dom.valueBetProfile.value = valueBet;
       updateTierDesc();
+      updateProfileDesc();
 
       // 对手风格也从 storage 同步回来，保证一打开面板就和托管用的是同一个值。
       state.opponentStyle = style;
@@ -154,6 +183,22 @@ function initAutopilot() {
   dom.strategyTier.addEventListener('change', () => {
     chrome.storage.local.set({ [STORAGE_KEYS.STRATEGY_TIER]: dom.strategyTier.value });
     updateTierDesc();
+    updateProfileDesc();
+  });
+
+  // 5) 两个策略旋钮分别持久化；控制器监听 storage 后会在下一次决策立即生效。
+  dom.aggressionProfile.addEventListener('change', () => {
+    chrome.storage.local.set({
+      [STORAGE_KEYS.AGGRESSION_PROFILE]: dom.aggressionProfile.value,
+    });
+    updateProfileDesc();
+  });
+
+  dom.valueBetProfile.addEventListener('change', () => {
+    chrome.storage.local.set({
+      [STORAGE_KEYS.VALUE_BET_PROFILE]: dom.valueBetProfile.value,
+    });
+    updateProfileDesc();
   });
 }
 
@@ -163,12 +208,49 @@ function updateTierDesc() {
   dom.tierDesc.textContent = cur ? cur.desc : '';
 }
 
+// 两个旋钮放在同一段说明里，用户能同时看到“是否更敢打”和“大牌打多大”。
+function updateProfileDesc() {
+  const aggression = getAggressionProfile(dom.aggressionProfile.value);
+  const valueBet = getValueBetProfile(dom.valueBetProfile.value);
+  const enabled = dom.strategyTier.value === 'complex';
+  dom.aggressionProfile.disabled = !enabled;
+  dom.valueBetProfile.disabled = !enabled;
+  dom.profileDesc.textContent = enabled
+    ? `${aggression.desc} ${valueBet.desc}`
+    : '这两项只在“档位②·复杂判断”下生效。';
+}
+
+// 把动作整理成一句"人话徽标"：加注/下注带上金额，其余只显示动作名。
+//   例："加注 → 加注 40"、"跟注 → 跟注 20"、"弃牌 → 弃牌"。
+//   预告和最近动作共用这套口径，保证两处显示一致（数据一致性）。
+function formatActionBadge(info) {
+  const name = info.label || info.action || '动作';
+  // 只有加注/下注这类"要花钱"的动作才拼金额；金额为 0 或缺失就不拼。
+  const amt = Number(info.amount) || 0;
+  const isBet = info.action === 'raise' || info.action === 'call';
+  if (isBet && amt > 0) return `${name} ${amt}`;
+  return name;
+}
+
+// 显示"接下来打算做什么"（动手之前的预告，由后台转发 AUTOPILOT_PLAN 过来）。
+//   这是在真正点击之前显示的——此时机器人正处于拟人延迟(1.2~3.5 秒)里，
+//   你看到后如果不认同，还来得及自己接管操作。
+function showNextPlan(plan) {
+  if (!plan) return;
+  dom.nextPlan.hidden = false;
+  const eqText = plan.equity != null ? `（胜率 ${plan.equity}%）` : '';
+  dom.nextPlanBadge.textContent = formatActionBadge(plan);
+  dom.nextPlanReason.textContent = `准备${plan.reason || '执行此动作'}${eqText}`;
+}
+
 // 显示"最近一次托管动作"（由后台转发 AUTOPILOT_ACTION 过来）
 function showLastAction(acted) {
   if (!acted) return;
+  // 动作真正落地了 => 预告使命完成，隐藏预告区，避免"接下来"和"最近"重复刷屏。
+  dom.nextPlan.hidden = true;
   dom.lastAction.hidden = false;
   const eqText = acted.equity != null ? `（胜率 ${acted.equity}%）` : '';
-  dom.lastActionBadge.textContent = acted.label || acted.action || '动作';
+  dom.lastActionBadge.textContent = formatActionBadge(acted);
   dom.lastActionReason.textContent = `${acted.reason || ''}${eqText}`;
 }
 
@@ -200,6 +282,8 @@ port.onMessage.addListener((msg) => {
   } else if (msg.type === PANEL_MESSAGE.NEW_RECORD) {
     state.records.push(msg.record); // 增量：追加一条
     scheduleCompute();
+  } else if (msg.type === PANEL_MESSAGE.AUTOPILOT_PLAN) {
+    showNextPlan(msg.plan); // 托管"接下来打算做"的预告（动手之前）
   } else if (msg.type === PANEL_MESSAGE.AUTOPILOT_ACTION) {
     showLastAction(msg.acted); // 托管刚执行了一个动作，显示出来
   }

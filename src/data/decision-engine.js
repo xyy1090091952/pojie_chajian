@@ -21,6 +21,8 @@ import {
   POKER_ACTION,
   getStrategyTier,
   DEFAULT_OPPONENT_STYLE,
+  DEFAULT_AGGRESSION_PROFILE,
+  DEFAULT_VALUE_BET_PROFILE,
   getOpponentPercent,
 } from '../common/constants.js';
 import { simulateEquity } from './equity-engine.js';
@@ -40,11 +42,28 @@ const STRATEGY_REGISTRY = {
 };
 
 /**
+ * 把策略算出的“加注至金额”限制在服务器明确给出的合法范围内。
+ * 拿不到某一侧边界时只限制另一侧；两侧都没有则保持原值。
+ */
+function normalizeRaiseAmount(amount, minRaiseTo, maxRaiseTo) {
+  let value = Number(amount);
+  if (!Number.isFinite(value) || value <= 0) return 0;
+
+  const min = Number(minRaiseTo);
+  const max = Number(maxRaiseTo);
+  if (Number.isFinite(max) && max > 0) value = Math.min(value, max);
+  if (Number.isFinite(min) && min > 0) value = Math.max(value, min);
+  return Math.round(value);
+}
+
+/**
  * 【对外主函数】对当前局面做一次托管决策。
  * @param {object} ctx 局面上下文（game-state.js 的 extractGameState 结果，需 ok=true）
  * @param {object} [config]
  *   @param {string} [config.tier]            策略档位 id（默认取档位配置里的默认档）
  *   @param {string} [config.opponentStyle]   对手风格 id（用于设定对手牌力，影响胜率）
+ *   @param {string} [config.aggressionProfile] 整体打法倾向（稳健/均衡/激进）
+ *   @param {string} [config.valueBetProfile] 大牌价值下注力度（标准/强势/最大化）
  *   @param {number} [config.simulations]     可选：覆盖模拟次数（测试时可调小加速）
  *   @param {Array}  [config.records]         可选：全部抓包记录。传入时会"边打边记"构建对手档案，
  *                                            在你没主动选风格（用默认档）且观察可靠时，用观察结果覆盖。
@@ -101,15 +120,33 @@ export function decide(ctx, config = {}) {
   // 5) 交给策略决策，拿到标准化动作结果。
   //    把 opponentStyle 一并传入：档位②会据此做"群体默认画像"的温和偏移
   //    （松桌多价值少诈唬、紧桌敢施压）。简单档不读这个字段，多传无害。
-  const result = strategyFn({ ctx, eq, opponentStyle });
+  const result = strategyFn({
+    ctx,
+    eq,
+    opponentStyle,
+    aggressionProfile: config.aggressionProfile || DEFAULT_AGGRESSION_PROFILE,
+    valueBetProfile: config.valueBetProfile || DEFAULT_VALUE_BET_PROFILE,
+  });
+  const rawAmount = Number(result.amount) || 0;
+  const amount =
+    result.action === POKER_ACTION.RAISE
+      ? normalizeRaiseAmount(rawAmount, ctx.minRaiseTo, ctx.maxRaiseTo)
+      : rawAmount;
+  const amountNote =
+    result.action === POKER_ACTION.RAISE && amount !== Math.round(rawAmount)
+      ? `（已按牌桌合法范围调整为 ${amount}）`
+      : '';
 
   // 6) 组装统一返回：带上档位、胜率、对手档案，方便面板展示与日志。
   return {
     ok: true,
     tier: tierConf.id,
     action: result.action || POKER_ACTION.CHECK,
-    amount: Number(result.amount) || 0,
-    reason: (result.reason || '') + modelNote + fallbackNote,
+    // 使用服务器认可的合法金额，让“接下来”预告与最终实际下注保持一致。
+    amount,
+    minRaiseTo: ctx.minRaiseTo ?? null,
+    maxRaiseTo: ctx.maxRaiseTo ?? null,
+    reason: (result.reason || '') + amountNote + modelNote + fallbackNote,
     equity: eq, // 把胜率一起带出来，面板可直接显示，不必再算一遍
     opponentModel, // 对手档案（可能为 null/不可靠），面板可选择性展示
   };

@@ -18,8 +18,11 @@ import {
   STORAGE_KEYS,
   TURN_INDICATOR_RULES,
   RUNTIME_MESSAGE,
+  POKER_ACTION_NAMES,
   DEFAULT_STRATEGY_TIER,
   DEFAULT_OPPONENT_STYLE,
+  DEFAULT_AGGRESSION_PROFILE,
+  DEFAULT_VALUE_BET_PROFILE,
 } from '../../common/constants.js';
 import { isMyTurn } from './turn-detector.js';
 import { executeDecision, clickNextHand } from './action-executor.js';
@@ -29,6 +32,8 @@ const state = {
   enabled: AUTOPILOT.DEFAULT_ENABLED, // 托管总开关
   tier: DEFAULT_STRATEGY_TIER, // 策略档位
   opponentStyle: DEFAULT_OPPONENT_STYLE, // 对手牌力风格（影响决策胜率）
+  aggressionProfile: DEFAULT_AGGRESSION_PROFILE, // 整体打法倾向
+  valueBetProfile: DEFAULT_VALUE_BET_PROFILE, // 大牌价值下注力度
   autoNextHand: AUTOPILOT.AUTO_NEXT_HAND, // 房主：是否自动开始下一手
   timer: null, // 轮询定时器句柄
   busy: false, // 正在处理一次行动（防止重入）
@@ -43,6 +48,8 @@ function loadConfig() {
       STORAGE_KEYS.AUTOPILOT_ENABLED,
       STORAGE_KEYS.STRATEGY_TIER,
       STORAGE_KEYS.OPPONENT_STYLE,
+      STORAGE_KEYS.AGGRESSION_PROFILE,
+      STORAGE_KEYS.VALUE_BET_PROFILE,
       STORAGE_KEYS.AUTO_NEXT_HAND,
     ],
     (cfg) => {
@@ -50,6 +57,10 @@ function loadConfig() {
       state.enabled = cfg[STORAGE_KEYS.AUTOPILOT_ENABLED] ?? AUTOPILOT.DEFAULT_ENABLED;
       state.tier = cfg[STORAGE_KEYS.STRATEGY_TIER] ?? DEFAULT_STRATEGY_TIER;
       state.opponentStyle = cfg[STORAGE_KEYS.OPPONENT_STYLE] ?? DEFAULT_OPPONENT_STYLE;
+      state.aggressionProfile =
+        cfg[STORAGE_KEYS.AGGRESSION_PROFILE] ?? DEFAULT_AGGRESSION_PROFILE;
+      state.valueBetProfile =
+        cfg[STORAGE_KEYS.VALUE_BET_PROFILE] ?? DEFAULT_VALUE_BET_PROFILE;
       state.autoNextHand = cfg[STORAGE_KEYS.AUTO_NEXT_HAND] ?? AUTOPILOT.AUTO_NEXT_HAND;
       syncLoop();
     }
@@ -67,6 +78,14 @@ chrome.storage.onChanged.addListener((changes, area) => {
   }
   if (STORAGE_KEYS.OPPONENT_STYLE in changes) {
     state.opponentStyle = changes[STORAGE_KEYS.OPPONENT_STYLE].newValue ?? DEFAULT_OPPONENT_STYLE;
+  }
+  if (STORAGE_KEYS.AGGRESSION_PROFILE in changes) {
+    state.aggressionProfile =
+      changes[STORAGE_KEYS.AGGRESSION_PROFILE].newValue ?? DEFAULT_AGGRESSION_PROFILE;
+  }
+  if (STORAGE_KEYS.VALUE_BET_PROFILE in changes) {
+    state.valueBetProfile =
+      changes[STORAGE_KEYS.VALUE_BET_PROFILE].newValue ?? DEFAULT_VALUE_BET_PROFILE;
   }
   if (STORAGE_KEYS.AUTO_NEXT_HAND in changes) {
     state.autoNextHand = changes[STORAGE_KEYS.AUTO_NEXT_HAND].newValue ?? AUTOPILOT.AUTO_NEXT_HAND;
@@ -108,10 +127,14 @@ async function tick() {
       return;
     }
 
-    // 3.2 执行决策（找按钮、拟人延迟、点击）。
+    // 3.2 【预告】决策已出、但还没动手（executeDecision 里有 1.2~3.5 秒拟人延迟），
+    //     先把"接下来打算怎么做"推给面板，让你能提前看到机器人的意图、来得及接管。
+    reportPlan(decision);
+
+    // 3.3 执行决策（找按钮、拟人延迟、点击）。
     const result = await executeDecision(decision);
 
-    // 3.3 执行成功才进入冷却 + 上报面板展示"最近动作"。
+    // 3.4 执行成功才进入冷却 + 上报面板展示"最近动作"。
     if (result.ok) {
       state.lastActionAt = Date.now();
       reportActed(result, decision);
@@ -156,7 +179,12 @@ function requestDecision() {
       chrome.runtime.sendMessage(
         {
           type: RUNTIME_MESSAGE.GET_DECISION,
-          config: { tier: state.tier, opponentStyle: state.opponentStyle },
+          config: {
+            tier: state.tier,
+            opponentStyle: state.opponentStyle,
+            aggressionProfile: state.aggressionProfile,
+            valueBetProfile: state.valueBetProfile,
+          },
         },
         (resp) => {
           // lastError 要读一下，否则控制台会报"未处理的回调错误"
@@ -168,6 +196,34 @@ function requestDecision() {
       resolve(null); // service worker 没就绪时兜底
     }
   });
+}
+
+/**
+ * 把"接下来打算做什么"预告给面板（在真正点击之前）。
+ *   复用和 reportActed 几乎一样的字段结构，但消息类型是 AUTOPILOT_PLAN，
+ *   面板会把它显示在单独的"接下来"区域，和"最近动作"区分开。
+ * @param {object} decision 决策引擎产出的决策对象 {action, amount, reason, tier, equity,...}
+ */
+function reportPlan(decision) {
+  try {
+    chrome.runtime
+      .sendMessage({
+        type: RUNTIME_MESSAGE.AUTOPILOT_PLAN,
+        plan: {
+          action: decision.action,
+          // 优先用决策自带的中文标签；没有就用动作英文名兜底（面板还会再翻译一次）。
+          label: decision.label || POKER_ACTION_NAMES[decision.action] || decision.action,
+          amount: Number(decision.amount) || 0,
+          reason: decision.reason || '',
+          tier: decision.tier,
+          equity: decision.equity ? decision.equity.equity : null,
+          at: Date.now(),
+        },
+      })
+      .catch(() => {});
+  } catch {
+    /* 忽略 */
+  }
 }
 
 /** 把"刚执行的动作"上报后台，后台再转发给面板显示 */

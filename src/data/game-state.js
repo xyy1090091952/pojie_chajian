@@ -44,6 +44,9 @@ const STACK_KEYS = ['stack', 'chips', 'balance', 'remain', 'remaining', 'stackSi
 // 只读取明确的大盲字段，不用“小盲×2”等方式猜测，避免错误放宽入池条件。
 const BIG_BLIND_KEYS = ['bigBlind', 'bigBlindAmount', 'big_blind', 'bbAmount', 'blindSize'];
 const BLIND_CONTAINER_KEYS = ['blinds', 'blind', 'limits', 'stakes', 'config'];
+// 当前行动的合法范围。River 会在 view.actions 中明确给出 minRaiseTo / maxRaiseTo。
+// 这是服务器认可的真实范围，比根据 DOM 滑块或筹码自行猜测更可靠。
+const ACTIONS_KEYS = ['actions'];
 // 玩家"位置"相关字段候选（⚠️ 待核对真实数据再精确）：
 //   有的服务端在玩家对象上直接给位置标签（如 'BTN'/'CO'/'UTG'/'SB'/'BB'），
 //   有的只给一个"庄家按钮在哪个座位"的标记，由前端自己推算。两种都兼容尝试。
@@ -189,6 +192,29 @@ function extractBigBlind(view) {
 }
 
 /**
+ * 【防御式】抽取当前回合合法的“加注至”范围。
+ *   只接受服务器明确下发、且 max >= min 的正数；拿不到时返回 null。
+ * @param {object} view 当前牌桌状态
+ * @returns {{minRaiseTo:number|null,maxRaiseTo:number|null}}
+ */
+function extractRaiseBounds(view) {
+  const actions = pick(view, ACTIONS_KEYS);
+  if (!actions || typeof actions !== 'object') {
+    return { minRaiseTo: null, maxRaiseTo: null };
+  }
+
+  const min = Number(actions.minRaiseTo);
+  const max = Number(actions.maxRaiseTo);
+  const minRaiseTo = Number.isFinite(min) && min > 0 ? min : null;
+  const maxRaiseTo = Number.isFinite(max) && max > 0 ? max : null;
+
+  if (minRaiseTo != null && maxRaiseTo != null && maxRaiseTo < minRaiseTo) {
+    return { minRaiseTo: null, maxRaiseTo: null };
+  }
+  return { minRaiseTo, maxRaiseTo };
+}
+
+/**
  * 【对外主函数】从全部抓包记录里，抽取"最新一帧"的局面上下文。
  * @param {Array} records message-store 里的全部记录（panel 的 state.records）
  * @returns {{ok:boolean, reason?:string, hole?, board?, opponents?, pot?, toCall?, signature?}}
@@ -265,13 +291,30 @@ export function extractGameState(records) {
   // —— 大盲金额：用于翻牌前判断“只跟一个盲注是否便宜”，拿不到为 null ——
   const bigBlind = extractBigBlind(view);
 
+  // —— 当前合法加注范围：直接使用服务器下发的 minRaiseTo / maxRaiseTo ——
+  const { minRaiseTo, maxRaiseTo } = extractRaiseBounds(view);
+
   // 局面指纹：关键数据任一变化才需重算。
   const signature = [
     hole.join(','), board.join(','), opponents, pot, toCall,
     position || '-', stack ?? '-', bigBlind ?? '-',
+    minRaiseTo ?? '-', maxRaiseTo ?? '-',
   ].join('|');
 
-  return { ok: true, hole, board, opponents, pot, toCall, position, stack, bigBlind, signature };
+  return {
+    ok: true,
+    hole,
+    board,
+    opponents,
+    pot,
+    toCall,
+    position,
+    stack,
+    bigBlind,
+    minRaiseTo,
+    maxRaiseTo,
+    signature,
+  };
 }
 
 /**
@@ -309,6 +352,7 @@ export const STATE_FIELD_KEYS = {
   STACK_KEYS,
   BIG_BLIND_KEYS,
   BLIND_CONTAINER_KEYS,
+  ACTIONS_KEYS,
   POSITION_KEYS,
   DEALER_KEYS,
 };

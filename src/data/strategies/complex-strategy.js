@@ -23,6 +23,8 @@ import {
   EQUITY,
   AUTOPILOT,
   getOpponentDecisionProfile,
+  getAggressionProfile,
+  getValueBetProfile,
 } from '../../common/constants.js';
 import { potOdds } from '../equity-engine.js';
 import { evaluate, detectDraws, analyzeBoardTexture, HAND_RANK, BOARD_TEXTURE } from '../poker-engine.js';
@@ -96,8 +98,15 @@ const PRE_MARGINAL_POT_ODDS = 28; // 边缘牌：只在便宜(<=28%，约等于�
 // “便宜入池”补充规则：解决站点尚未把盲注计入 pot、导致底池赔率虚高的问题。
 // 只有费用确实低、并且手牌达到最低质量时才放行，不会让 72o 之类的垃圾牌无脑入池。
 const PRE_CHEAP_ENTRY_SCORE = 3; // 最低入池牌力；早位还会自动提高 1 档
-const PRE_CHEAP_ENTRY_MAX_BB = 1.05; // 待跟注不超过约 1 个大盲
-const PRE_CHEAP_ENTRY_STACK_PCT = 3; // 或者待跟注不超过剩余筹码的 3%
+const PRE_CHEAP_ENTRY_MAX_BB = 1.05; // 待跟注不超过约 1 个大盲（最可靠的"便宜"判据）
+// ⚠️ 占筹码比例只在【拿不到大盲数据】时才作为备选判据，且阈值更严(2%)：
+//   深筹码时 3% 可能是十几个大盲的大注，若用它单独放行，会把大注误判成"便宜"而乱入池。
+const PRE_CHEAP_ENTRY_STACK_PCT = 2; // 备选：待跟注不超过剩余筹码的 2%
+
+// 翻牌前「多人底池」收紧：对手每多 1 个(超过 1 人之后)，可接受的底池赔率上限下调这么多点。
+//   道理（讲人话）：翻牌前面对的人越多，非顶级牌越容易被其中某一家压制，入池要更便宜才划算。
+//   仅作用于"可玩/投机/边缘"这些非顶级牌；真正的强起手(AA/KK/AK 等)多人也照打，不受此限。
+const PRE_MULTIWAY_ODDS_SHRINK = 4;
 
 /**
  * 【翻牌前专用决策】只在公共牌 0 张时调用。
@@ -106,13 +115,21 @@ const PRE_CHEAP_ENTRY_STACK_PCT = 3; // 或者待跟注不超过剩余筹码的 
  * @param {object} profile 群体画像旋钮（callThreshold/valueStretch...）
  * @param {number} positionShift 位置带来的"紧度偏移"（正=更紧，负=更松）
  * @param {number} sizeMult 下注尺度乘数（翻牌前牌面还没出，固定取 1，这里保留参数好统一）
+ * @param {object} aggression 整体打法参数（入池门槛、可接受赔率等）
+ * @param {object} valueBet 大牌价值下注参数（仅放大明确的价值下注）
  * @returns {{action, amount, reason}}
  */
-function decidePreflop(ctx, profile, positionShift, sizeMult) {
+function decidePreflop(ctx, profile, positionShift, sizeMult, aggression, valueBet) {
   const pot = Number(ctx.pot) || 0;
   const toCall = Number(ctx.toCall) || 0;
   const stack = Number(ctx.stack);
   const bigBlind = Number(ctx.bigBlind);
+  // 存活对手数：翻牌前也要看人数（人越多，非顶级牌越该收紧）。至少按 1 个对手算。
+  const opponents = Math.max(1, Number(ctx.opponents) || 1);
+
+  // 多人底池"收紧量"（百分点）：每多 1 个对手，非顶级牌可接受的底池赔率上限下调这么多。
+  //   例：2 个对手 => 下调 4 点；3 个 => 8 点。只作用于可玩/投机/边缘牌，强起手不受影响。
+  const multiwayShrink = Math.max(0, opponents - 1) * PRE_MULTIWAY_ODDS_SHRINK;
 
   // 起手牌强度（复用 Chen 公式）。拿不到两张牌就保守过牌/弃牌。
   const hs = handStrength(ctx.hole);
@@ -125,7 +142,8 @@ function decidePreflop(ctx, profile, positionShift, sizeMult) {
   // "投机手"：本身强度不高，但中了就是大牌 —— 小对子、同花连张。便宜就值得看翻牌。
   const isSpeculative = (hs.isPair && hs.highRank <= 9) || (hs.suited && hs.connected);
   // 画像/位置合成的"紧度偏移"：正=更保守，负=更激进。换算成对 Chen 分门槛的微调。
-  const tightShift = (profile.callThreshold + positionShift) / 2; // 2 分≈1 档，缩小影响
+  const tightShift =
+    (profile.callThreshold + positionShift) / 2 + aggression.thresholdShift;
   const strongGate = PRE_STRONG_SCORE + tightShift;
   const playGate = PRE_PLAYABLE_SCORE + tightShift;
 
@@ -133,10 +151,15 @@ function decidePreflop(ctx, profile, positionShift, sizeMult) {
   if (toCall <= 0) {
     // 强起手 => 价值加注，先把底池做大、也筛掉一堆垃圾牌。
     if (hs.score >= strongGate) {
-      const amount = raiseAmount(pot, RAISE_RATIO_VALUE, sizeMult * profile.valueStretch);
+      const amount = raiseAmount(
+        pot,
+        RAISE_RATIO_VALUE,
+        sizeMult * profile.valueStretch * valueBet.sizeMultiplier
+      );
       return {
         action: POKER_ACTION.RAISE,
         amount,
+        raiseClass: 'strong',
         reason: `翻牌前强起手（强度 ${hs.score}），加注到约 ${amount} 建立底池。`,
       };
     }
@@ -151,17 +174,21 @@ function decidePreflop(ctx, profile, positionShift, sizeMult) {
   const potOddsPct = odds.ok && odds.breakevenPct != null ? odds.breakevenPct : 100;
 
   // “便宜”不能只看底池赔率：站点若暂时上报 pot=0，正常跟一个大盲也会被算成 100%。
-  // 因此再看两项真实数据：是否只需跟约 1BB、是否只占剩余筹码很小比例。
+  // 因此再看真实下注量。两条判据【优先级】而非平级，避免深筹码时大注被误判成便宜：
+  //   1) 首选大盲倍数：拿得到大盲就【只信它】（toCall ≤ 约 1BB 才算便宜），最可靠；
+  //   2) 仅当大盲完全拿不到时，才退回"占筹码比例"做备选，且阈值收到很严的 2%。
   const costInBb = Number.isFinite(bigBlind) && bigBlind > 0 ? toCall / bigBlind : null;
   const stackCostPct = Number.isFinite(stack) && stack > 0 ? (toCall / stack) * 100 : null;
   const cheapByBlind = costInBb != null && costInBb <= PRE_CHEAP_ENTRY_MAX_BB;
   const cheapByStack = stackCostPct != null && stackCostPct <= PRE_CHEAP_ENTRY_STACK_PCT;
-  const cheapEntry = cheapByBlind || cheapByStack;
+  // 关键：有大盲数据就不碰 stack 判据（防止 3% 这类"深筹码大注"被当便宜）；
+  //   只有大盲彻底缺失(costInBb==null)时，才允许用更严的 stack 判据兜底。
+  const cheapEntry = costInBb != null ? cheapByBlind : cheapByStack;
 
   // 早位信息少，最低牌力提高一档；晚位仍保持基础门槛，但不会放行明显垃圾牌。
   const cheapEntryGate = Math.max(
     2,
-    PRE_CHEAP_ENTRY_SCORE + Math.max(0, tightShift)
+    PRE_CHEAP_ENTRY_SCORE + tightShift
   );
   const cheapEntryEligible =
     hs.score >= cheapEntryGate ||
@@ -170,30 +197,52 @@ function decidePreflop(ctx, profile, positionShift, sizeMult) {
 
   // 强起手 => 直接加注（翻牌前强牌不怕，主动施压拿价值）。
   if (hs.score >= strongGate) {
-    const amount = raiseAmount(pot + toCall, RAISE_RATIO_VALUE, sizeMult * profile.valueStretch);
+    const amount = raiseAmount(
+      pot + toCall,
+      RAISE_RATIO_VALUE,
+      sizeMult * profile.valueStretch * valueBet.sizeMultiplier
+    );
     return {
       action: POKER_ACTION.RAISE,
       amount,
+      raiseClass: 'strong',
       reason: `翻牌前强起手（强度 ${hs.score}），再加注到约 ${amount} 要价值。`,
     };
   }
+  // 非顶级牌的三档"可接受底池赔率上限"，先按多人底池收紧（人越多，上限越低）。
+  //   最低不低于 10%，避免多人时门槛被压到负数、把便宜的好牌也错弃。
+  const playableOdds = Math.max(
+    10,
+    PRE_PLAYABLE_POT_ODDS + aggression.preflopOddsShift - multiwayShrink
+  );
+  const specOdds = Math.max(
+    10,
+    PRE_SPEC_POT_ODDS + aggression.preflopOddsShift - multiwayShrink
+  );
+  const marginalOdds = Math.max(
+    10,
+    PRE_MARGINAL_POT_ODDS + aggression.preflopOddsShift - multiwayShrink
+  );
+  // 多人时在理由里标一句，便于你在面板看懂为什么门槛更严。
+  const multiwayText = opponents > 1 ? `、${opponents} 人池已收紧` : '';
+
   // 可玩牌 => 底池赔率不太差就跟（看一张翻牌再说）。
-  if (hs.score >= playGate && potOddsPct <= PRE_PLAYABLE_POT_ODDS) {
+  if (hs.score >= playGate && potOddsPct <= playableOdds) {
     return {
       action: POKER_ACTION.CALL,
       amount: 0,
-      reason: `翻牌前可玩牌（强度 ${hs.score}），底池赔率 ${Math.round(potOddsPct)}% 划算，跟注看翻牌。`,
+      reason: `翻牌前可玩牌（强度 ${hs.score}${multiwayText}），底池赔率 ${Math.round(potOddsPct)}% 划算，跟注看翻牌。`,
     };
   }
   // 投机手 => 靠隐含赔率，赔率不太差就跟（搏翻牌中大牌）。
-  if (isSpeculative && potOddsPct <= PRE_SPEC_POT_ODDS) {
+  if (isSpeculative && potOddsPct <= specOdds) {
     return {
       action: POKER_ACTION.CALL,
       amount: 0,
-      reason: `翻牌前投机手（${hs.isPair ? '小对子' : '同花连张'}），底池赔率 ${Math.round(potOddsPct)}% 可接受，跟注搏翻牌。`,
+      reason: `翻牌前投机手（${hs.isPair ? '小对子' : '同花连张'}${multiwayText}），底池赔率 ${Math.round(potOddsPct)}% 可接受，跟注搏翻牌。`,
     };
   }
-  // 底池数据暂时不准也没关系：只跟约 1BB / 只占筹码 3%，且手牌不是垃圾牌，就允许看翻牌。
+  // 底池数据暂时不准也没关系：费用确实低（约 1BB，或大盲缺失时占筹码≤2%），且手牌不是垃圾牌，就允许看翻牌。
   if (cheapEntry && cheapEntryEligible) {
     const costText = cheapByBlind
       ? `约 ${costInBb.toFixed(1)} 个大盲`
@@ -205,18 +254,18 @@ function decidePreflop(ctx, profile, positionShift, sizeMult) {
     };
   }
   // 边缘牌 => 只有很便宜（约等于跟个盲注）才跟，大注照弃。
-  if (hs.score >= PRE_MARGINAL_SCORE && potOddsPct <= PRE_MARGINAL_POT_ODDS) {
+  if (hs.score >= PRE_MARGINAL_SCORE && potOddsPct <= marginalOdds) {
     return {
       action: POKER_ACTION.CALL,
       amount: 0,
-      reason: `翻牌前边缘牌（强度 ${hs.score}）但很便宜（底池赔率 ${Math.round(potOddsPct)}%），跟注看翻牌。`,
+      reason: `翻牌前边缘牌（强度 ${hs.score}${multiwayText}）但很便宜（底池赔率 ${Math.round(potOddsPct)}%），跟注看翻牌。`,
     };
   }
   // 其余 => 弃牌（牌不够强、底池赔率也不划算，没有搏的理由）。
   return {
     action: POKER_ACTION.FOLD,
     amount: 0,
-    reason: `翻牌前牌力一般（强度 ${hs.score}）、底池赔率 ${Math.round(potOddsPct)}% 不划算，弃牌。`,
+    reason: `翻牌前牌力一般（强度 ${hs.score}${multiwayText}）、底池赔率 ${Math.round(potOddsPct)}% 不划算，弃牌。`,
   };
 }
 
@@ -250,12 +299,12 @@ function raiseAmount(pot, ratio, mult = 1) {
 // ============ 加注额"封顶"（防误全下的策略层保险）============
 // 为什么需要：各分支算出的加注额是"底池×比例"，本身到不了全下；但为双保险再加一道硬上限，
 //   让【中等及以下的牌绝不打出接近全下的尺度】——这正对应"只有一对却 all in"的担忧。
-//   - 能拿到筹码(stack)：按"剩余筹码的百分比"封顶；只有超强成手(葫芦及以上)才放宽。
+//   - 能拿到筹码(stack)：普通加注固定 1/3；强牌/超强牌按“大牌下注”配置放宽。
 //   - 拿不到筹码(stack=null)：退回"按底池倍数"封顶，保守兜底，绝不编一个假筹码。
 const STACK_CAP_NORMAL = 0.33; // 普通牌：加注额最多押到剩余筹码的 1/3
-const STACK_CAP_STRONG = 0.75; // 超强成手：最多 3/4（接近全下这种极端留给人工决定）
 const POT_CAP_MULT_NO_STACK = 1.0; // 没有筹码数据时：加注额最多 1 倍底池（保守）
-// "超强成手"门槛：葫芦及以上才算（可以打大）；四条/同花顺更不用说。一对/两对/三条都不算。
+const POT_CAP_MULT_STRONG_NO_STACK = 2.0; // 明确强牌最多 2 倍底池，仍不直接推定全下
+// "超强成手"门槛：葫芦及以上使用最宽上限；三条到同花属于普通强牌。
 const SUPER_STRONG_RANK = HAND_RANK.FULL_HOUSE; // 6
 
 /**
@@ -265,19 +314,29 @@ const SUPER_STRONG_RANK = HAND_RANK.FULL_HOUSE; // 6
  *   @param {number} p.pot 当前底池
  *   @param {number|null} [p.stack] 我的剩余筹码（拿不到为 null/undefined）
  *   @param {number} p.madeRank 当前成手等级（HAND_RANK），决定是否放宽
+ *   @param {'normal'|'strong'} [p.raiseClass] 本次是否属于明确的强牌价值下注
+ *   @param {object} p.valueBet 大牌下注配置（强牌/超强牌筹码上限）
  * @returns {number} 封顶后的加注额（至少 1）
  */
-function capRaiseAmount(amount, { pot, stack, madeRank }) {
+function capRaiseAmount(amount, { pot, stack, madeRank, raiseClass, valueBet }) {
   let capped = Math.max(1, Math.floor(Number(amount) || 0));
-  const strong = Number(madeRank) >= SUPER_STRONG_RANK; // 葫芦及以上才允许打大
+  const strong = raiseClass === 'strong';
+  const monster = strong && Number(madeRank) >= SUPER_STRONG_RANK;
 
   if (stack != null && Number.isFinite(stack) && stack > 0) {
     // 有真实筹码：按筹码百分比封顶（这是最贴合"别全下"的保险）。
-    const stackCap = Math.max(1, Math.floor(stack * (strong ? STACK_CAP_STRONG : STACK_CAP_NORMAL)));
+    const capRatio = monster
+      ? valueBet.monsterStackCap
+      : strong
+        ? valueBet.strongStackCap
+        : STACK_CAP_NORMAL;
+    const stackCap = Math.max(1, Math.floor(stack * capRatio));
     capped = Math.min(capped, stackCap);
   } else {
-    // 没有筹码数据：退回按底池倍数封顶（强牌放宽到 2 倍底池），绝不编筹码。
-    const potCap = Math.floor((Number(pot) || 0) * POT_CAP_MULT_NO_STACK * (strong ? 2 : 1));
+    // 没有筹码数据：普通牌最多 1 倍池，明确强牌最多 2 倍池，绝不编造筹码。
+    const potCap = Math.floor(
+      (Number(pot) || 0) * (strong ? POT_CAP_MULT_STRONG_NO_STACK : POT_CAP_MULT_NO_STACK)
+    );
     if (potCap > 0) capped = Math.min(capped, potCap);
   }
   return capped;
@@ -290,9 +349,11 @@ function capRaiseAmount(amount, { pot, stack, madeRank }) {
  *   @param {object} params.ctx 局面：{hole, board, opponents, pot, toCall, position?, stack?}
  *   @param {object} params.eq  胜率结果：{ok, equity, win, ...}
  *   @param {string} [params.opponentStyle] 对手风格 id（群体默认画像用，缺省=中性）
+ *   @param {string} [params.aggressionProfile] 整体打法倾向 id
+ *   @param {string} [params.valueBetProfile] 大牌下注方式 id
  * @returns {{action:string, amount:number, reason:string}}
  */
-function decideCore({ ctx, eq, opponentStyle }) {
+function decideCore({ ctx, eq, opponentStyle, aggressionProfile, valueBetProfile }) {
   // 兜底：胜率没算出来就别乱动。
   if (!eq || !eq.ok) {
     return { action: POKER_ACTION.CHECK, amount: 0, reason: '胜率数据不足，暂不主动行动。' };
@@ -322,6 +383,9 @@ function decideCore({ ctx, eq, opponentStyle }) {
 
   // —— 【新 6】群体默认画像：按桌子风格拿到"温和旋钮"（拿不到风格=中性 1/0）——
   const profile = getOpponentDecisionProfile(opponentStyle);
+  // 用户主动配置的两个旋钮：查不到 id 时 getter 会回退默认值，保证策略参数完整。
+  const aggression = getAggressionProfile(aggressionProfile).decision;
+  const valueBet = getValueBetProfile(valueBetProfile).decision;
 
   // —— 【新 7】位置：晚位更激进 / 早位更紧（拿不到位置 position=null，偏移为 0 不动）——
   const positionShift = POSITION_MARGIN_SHIFT[ctx.position] || 0;
@@ -331,28 +395,38 @@ function decideCore({ ctx, eq, opponentStyle }) {
   //   直接用它判断会"什么牌都想弃、也不看看牌费用"。翻牌前改用"起手强度 + 看牌贵不贵"
   //   来决定（见 decidePreflop）。翻牌后(board>=3)仍走下面成熟的成手/听牌逻辑，不受影响。
   if (ctx.board.length === 0) {
-    return decidePreflop(ctx, profile, positionShift, sizeMult);
+    return decidePreflop(ctx, profile, positionShift, sizeMult, aggression, valueBet);
   }
 
   // 把"画像门槛偏移 + 位置偏移"合成一个"紧度偏移"：正=更谨慎，负=更激进。
   //   湿牌面再额外加一点谨慎（边缘牌别乱跟）。全部集中算一次，后面复用。
-  const tightnessShift = profile.callThreshold + positionShift + (wet ? 1 : 0);
+  const tightnessShift =
+    profile.callThreshold + positionShift + (wet ? 1 : 0) + aggression.thresholdShift;
 
   // 价值下注倾向：松桌(valueStretch>1)把价值注门槛压低一点，更薄地要价值。
   const valueThin = (profile.valueStretch - 1) * 10; // 1.2 => 压低 2 点；0.9 => 抬高 1 点
 
   // 诈唬倾向：松桌(bluffBias 很小)干脆关掉半诈唬（他们爱跟注，诈唬是送钱）。
-  const allowBluff = profile.bluffBias >= 0.75;
+  const allowBluff = profile.bluffBias >= 0.75 && aggression.allowSemiBluff;
 
   // ========== 情况 A：不用花钱（可免费过牌/下注）==========
   if (toCall <= 0) {
     // A1 强成手、或胜率很高 => 价值下注要钱（门槛随画像/位置/牌面微调）。
-    const valueGate = FREE_VALUE_RAISE_EQUITY - valueThin + tightnessShift;
+    const valueGate =
+      FREE_VALUE_RAISE_EQUITY -
+      valueThin +
+      tightnessShift +
+      aggression.valueGateShift;
     if (isStrongMade || equity >= valueGate) {
-      const amount = raiseAmount(pot, RAISE_RATIO_VALUE, sizeMult * profile.valueStretch);
+      const amount = raiseAmount(
+        pot,
+        RAISE_RATIO_VALUE,
+        sizeMult * profile.valueStretch * valueBet.sizeMultiplier
+      );
       return {
         action: POKER_ACTION.RAISE,
         amount,
+        raiseClass: isStrongMade ? 'strong' : 'normal',
         reason: `${isStrongMade ? '已成强牌' : `胜率 ${equity}%`}，价值下注到约 ${amount}（${texture.level === BOARD_TEXTURE.WET ? '湿面加大' : texture.level === BOARD_TEXTURE.DRY ? '干面收小' : '标准'}）。`,
       };
     }
@@ -396,10 +470,15 @@ function decideCore({ ctx, eq, opponentStyle }) {
 
   // B1 强成手 + 明显领先 => 加注扩大收益（尺度随牌面湿度 & 价值倾向调整）。
   if (isStrongMade && margin >= EQUITY.CALL_MARGIN) {
-    const amount = raiseAmount(pot, RAISE_RATIO_VALUE, sizeMult * profile.valueStretch);
+    const amount = raiseAmount(
+      pot,
+      RAISE_RATIO_VALUE,
+      sizeMult * profile.valueStretch * valueBet.sizeMultiplier
+    );
     return {
       action: POKER_ACTION.RAISE,
       amount,
+      raiseClass: 'strong',
       reason: `已成强牌且胜率 ${equity}% 高于门槛 ${gateText}%，加注到约 ${amount}。`,
     };
   }
@@ -444,24 +523,33 @@ export function actionName(action) {
  * 【对外主函数】复杂档决策（唯一出口）。
  *   = 先跑 decideCore 得到决策，再对"加注"动作统一封顶（防中等牌误打成接近全下）。
  *   在这里集中封顶的好处：各分支不用各自记得封顶，逻辑只有一处，好测好调（单一出口原则）。
- * @param {object} params {ctx, eq, opponentStyle}
+ * @param {object} params {ctx, eq, opponentStyle, aggressionProfile, valueBetProfile}
  *   ctx 可带 stack（我的剩余筹码，防御式；拿不到为 null，封顶自动退回按底池倍数）
  * @returns {{action:string, amount:number, reason:string}}
  */
-export function decide({ ctx, eq, opponentStyle }) {
-  const result = decideCore({ ctx, eq, opponentStyle });
+export function decide({ ctx, eq, opponentStyle, aggressionProfile, valueBetProfile }) {
+  const result = decideCore({
+    ctx,
+    eq,
+    opponentStyle,
+    aggressionProfile,
+    valueBetProfile,
+  });
 
   // 只有"加注"才需要封顶；其它动作(过牌/跟注/弃牌)金额本就为 0，原样返回。
   if (result.action !== POKER_ACTION.RAISE || !(result.amount > 0)) {
     return result;
   }
 
-  // 当前成手等级：决定封顶松紧（葫芦及以上才放宽，一对/两对/三条都按普通封顶）。
+  // 当前成手等级 + 加注性质共同决定封顶：半诈唬不放宽，明确价值注才按强牌级别放宽。
   const madeRank = evaluate([...(ctx.hole || []), ...(ctx.board || [])])[0];
+  const valueBet = getValueBetProfile(valueBetProfile).decision;
   const capped = capRaiseAmount(result.amount, {
     pot: Number(ctx.pot) || 0,
     stack: ctx.stack, // 可能为 null/undefined，capRaiseAmount 内部会处理
     madeRank,
+    raiseClass: result.raiseClass || 'normal',
+    valueBet,
   });
 
   // 没被削减就原样返回；被削减了，补一句提示让理由透明（便于你在面板看懂为什么没打那么大）。

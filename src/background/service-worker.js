@@ -43,7 +43,13 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       return true; // 已（同步）回传，这里 computeDecision 是同步的，返回 true 更稳妥
     }
 
-    // 1.3 托管执行了一个动作：转成面板消息，显示"最近动作"
+    // 1.3 托管"打算做"的预告（动手之前）：转成面板消息，显示在"接下来"区域
+    case RUNTIME_MESSAGE.AUTOPILOT_PLAN: {
+      broadcast({ type: PANEL_MESSAGE.AUTOPILOT_PLAN, plan: message.plan });
+      return false;
+    }
+
+    // 1.4 托管执行了一个动作：转成面板消息，显示"最近动作"
     case RUNTIME_MESSAGE.AUTOPILOT_ACTED: {
       broadcast({ type: PANEL_MESSAGE.AUTOPILOT_ACTION, acted: message.acted });
       return false;
