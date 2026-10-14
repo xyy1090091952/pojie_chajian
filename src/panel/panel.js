@@ -28,6 +28,7 @@ import {
 import { extractGameState } from '../data/game-state.js';
 import { simulateEquity } from '../data/equity-engine.js';
 import { evaluate, handName, detectDraws, parseCard } from '../data/poker-engine.js';
+import { buildOpponentModel } from '../data/opponent-model.js';
 
 // ============ 本地状态 ============
 const state = {
@@ -43,6 +44,7 @@ const dom = {
   styleDesc: document.getElementById('styleDesc'), // 风格说明文字
   // —— 自动托管相关 ——
   autopilotEnabled: document.getElementById('autopilotEnabled'), // 托管开关
+  autoNextHand: document.getElementById('autoNextHand'), // 房主：自动开始下一手开关
   strategyTier: document.getElementById('strategyTier'), // 策略档位下拉
   tierDesc: document.getElementById('tierDesc'), // 档位说明
   lastAction: document.getElementById('lastAction'), // 最近动作容器
@@ -62,6 +64,7 @@ const dom = {
   draws: document.getElementById('draws'),
   samples: document.getElementById('samples'),
   noteStyle: document.getElementById('noteStyle'), // 底部说明里的"按xx牌力估算"
+  oppmodelBody: document.getElementById('oppmodelBody'), // 对手档案展示区
 };
 
 // ============ 对手风格下拉框：初始化 + 切换时重算 ============
@@ -96,8 +99,9 @@ function updateStyleDesc() {
 //   storage 是"单一数据源"，面板和托管永远看同一份配置，不会打架。
 function initAutopilot() {
   // 1) 用常量里的档位列表动态生成下拉项（数据驱动，加档位只改 constants.js）。
+  //    available=false 的档位（还没开发完）加 disabled，让它置灰、选不中。
   dom.strategyTier.innerHTML = STRATEGY_TIERS.map(
-    (t) => `<option value="${t.id}">${t.label}</option>`
+    (t) => `<option value="${t.id}"${t.available ? '' : ' disabled'}>${t.label}</option>`
   ).join('');
 
   // 2) 从 storage 读回上次的配置，回填到界面（没存过就用默认值）。
@@ -106,13 +110,21 @@ function initAutopilot() {
       STORAGE_KEYS.AUTOPILOT_ENABLED,
       STORAGE_KEYS.STRATEGY_TIER,
       STORAGE_KEYS.OPPONENT_STYLE,
+      STORAGE_KEYS.AUTO_NEXT_HAND,
     ],
     (cfg) => {
       const enabled = cfg[STORAGE_KEYS.AUTOPILOT_ENABLED] ?? AUTOPILOT.DEFAULT_ENABLED;
-      const tier = cfg[STORAGE_KEYS.STRATEGY_TIER] ?? DEFAULT_STRATEGY_TIER;
       const style = cfg[STORAGE_KEYS.OPPONENT_STYLE] ?? DEFAULT_OPPONENT_STYLE;
+      // 自动开始下一手：没存过时用常量默认值（默认开，受总开关管辖所以安全）。
+      const autoNext = cfg[STORAGE_KEYS.AUTO_NEXT_HAND] ?? AUTOPILOT.AUTO_NEXT_HAND;
+
+      // 档位：若存的是"不可用"的档（如 ②③还没开发），回退到默认档，避免下拉空白。
+      let tier = cfg[STORAGE_KEYS.STRATEGY_TIER] ?? DEFAULT_STRATEGY_TIER;
+      const tierConf = getStrategyTier(tier);
+      if (!tierConf.available) tier = DEFAULT_STRATEGY_TIER;
 
       dom.autopilotEnabled.checked = Boolean(enabled);
+      dom.autoNextHand.checked = Boolean(autoNext);
       dom.strategyTier.value = tier;
       updateTierDesc();
 
@@ -127,6 +139,14 @@ function initAutopilot() {
   dom.autopilotEnabled.addEventListener('change', () => {
     chrome.storage.local.set({
       [STORAGE_KEYS.AUTOPILOT_ENABLED]: dom.autopilotEnabled.checked,
+    });
+  });
+
+  // 3.1) 「自动开始下一手」开关：同样写 storage，控制器会实时读到新值。
+  //      它只在托管总开关也打开时才真正生效（控制器里有判断）。
+  dom.autoNextHand.addEventListener('change', () => {
+    chrome.storage.local.set({
+      [STORAGE_KEYS.AUTO_NEXT_HAND]: dom.autoNextHand.checked,
     });
   });
 
@@ -150,6 +170,18 @@ function showLastAction(acted) {
   const eqText = acted.equity != null ? `（胜率 ${acted.equity}%）` : '';
   dom.lastActionBadge.textContent = acted.label || acted.action || '动作';
   dom.lastActionReason.textContent = `${acted.reason || ''}${eqText}`;
+}
+
+// ============ 对手档案（边打边记）展示 ============
+// 独立于胜率计算：每次有新数据就刷新一次，让你看到机器人"学"到了什么。
+//   展示逻辑完全信任数据层 buildOpponentModel 的结论（含诚实降级）：
+//   - reliable=true  => 高亮，显示判定出的桌面风格 + 入池率。
+//   - reliable=false => 普通样式，显示"数据不足/观察中"的原因（不编结论）。
+function renderOpponentModel() {
+  const model = buildOpponentModel(state.records); // model.reason 已是人话
+  dom.oppmodelBody.textContent = model.reason || '观察中…';
+  // 可靠时加高亮类，让"已学到结论"一眼可辨（样式在 panel.css）。
+  dom.oppmodelBody.classList.toggle('oppmodel__body--active', model.reliable === true);
 }
 
 // ============ 启动：先把对手风格下拉框建好 ============
@@ -184,6 +216,9 @@ function scheduleCompute() {
 }
 
 function compute() {
+  // 0) 先刷新"对手档案"（跨多手统计，和当前这手是否 ok 无关，所以放最前、无条件执行）
+  renderOpponentModel();
+
   // 1) 从抓包数据里抽出当前局面（数据层负责认字段、容错）
   const ctx = extractGameState(state.records);
   if (!ctx.ok) {

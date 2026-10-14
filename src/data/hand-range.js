@@ -16,6 +16,9 @@
  *   简单、够用，也方便解释。
  */
 
+// 复用底层的牌面解析：handStrength 要兼容字符串底牌（如 "As"）和 {r,s} 两种写法。
+import { parseCard } from './poker-engine.js';
+
 // 一副牌一共有 C(52,2) = 1326 种两张牌的组合。按"前百分之几"选牌组时用它做分母。
 const TOTAL_COMBOS = 1326;
 
@@ -131,4 +134,40 @@ export function comboClassKey(a, b) {
   if (high === low) return `P${high}`;
   const suited = a.s === b.s;
   return `${high}-${low}-${suited ? 's' : 'o'}`;
+}
+
+/**
+ * 【翻牌前专用】给你自己的两张底牌打"起手牌强度分"，并附带几个好用的特征。
+ *   —— 复用上面同一套 Chen 公式（不重写），只是把结果连同特征一起对外暴露，
+ *      供档位②的"翻牌前分支"判断：这手牌值不值得玩、是不是便宜能看的投机手。
+ * @param {Array<{r:number,s:string}>} hole 你的两张底牌（已解析成 {r,s}）
+ * @returns {{ok:boolean, score:number, isPair:boolean, suited:boolean,
+ *            connected:boolean, gap:number, highRank:number, lowRank:number}}
+ *   ok=false 表示底牌不足 2 张，调用方应跳过翻牌前判断。
+ */
+export function handStrength(hole) {
+  // 兼容两种写法：字符串（"As"）先用 parseCard 解析成 {r,s}；本就是 {r,s} 的原样用。
+  const list = (Array.isArray(hole) ? hole : [])
+    .map((c) => (typeof c === 'string' ? parseCard(c) : c))
+    .filter((c) => c && typeof c.r === 'number');
+  if (list.length < 2) {
+    return { ok: false, score: 0, isPair: false, suited: false, connected: false, gap: 99, highRank: 0, lowRank: 0 };
+  }
+  const a = list[0];
+  const b = list[1];
+  const high = Math.max(a.r, b.r);
+  const low = Math.min(a.r, b.r);
+  const isPair = high === low;
+  const suited = a.s === b.s;
+  const gap = high - low - 1; // 两张之间的空档（0=紧挨着的连张）
+  return {
+    ok: true,
+    score: chenScore(high, low, suited), // 复用同一份 Chen 评分
+    isPair,
+    suited,
+    connected: !isPair && gap <= 1, // 连张或仅差一张（有顺子潜力）
+    gap,
+    highRank: high,
+    lowRank: low,
+  };
 }

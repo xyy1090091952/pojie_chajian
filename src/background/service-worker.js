@@ -62,8 +62,11 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
  * @returns {object} 决策引擎的标准结果 {ok, action, amount, reason, tier, equity}
  */
 function computeDecision(config) {
-  const ctx = extractGameState(getAll()); // 抽出"最新一帧"的局面
-  return decide(ctx, config); // 交给决策引擎（内部先算胜率再按档位出动作）
+  const records = getAll(); // 全部抓包记录（既用于抽当前局面，也用于边打边记对手档案）
+  const ctx = extractGameState(records); // 抽出"最新一帧"的局面
+  // 把 records 一并透传给决策引擎：它会据此构建"对手档案"，在你用默认档
+  //   且观察可靠时自动按观察到的桌面风格打（拿不到可靠数据则退回手选画像）。
+  return decide(ctx, { ...config, records });
 }
 
 // —— 2) 维护与面板的长连接 ——

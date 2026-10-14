@@ -122,11 +122,46 @@ export const EQUITY = {
 //   例如 25 表示"只玩最强的前 25% 起手牌"（典型的紧凶玩家）。
 //   100 表示"任意两张牌都玩"（等于回到老的纯随机假设）。
 // id 用于界面下拉框和状态记录；percent 交给胜率引擎做过滤，二者解耦。
+//
+// decision 的含义（档位②·群体默认画像用）：同一个风格，不只影响"胜率算多少"，
+//   也影响"托管该怎么取舍"。这就是"看桌子性质下菜"：
+//   - callThreshold：跟注门槛的偏移（百分点）。负数=更舍得跟（面对爱弃牌的紧对手，
+//     可以多偷鸡/多下注施压）；正数=更谨慎（面对爱跟注的松对手，边缘牌别乱跟）。
+//   - bluffBias：诈唬/半诈唬倾向。>1 更爱诈唬（紧对手爱弃牌，诈唬更容易成功）；
+//     <1 收敛诈唬（松对手爱跟注，诈唬是送钱）。
+//   - valueStretch：价值下注倾向。>1 更爱用成手价值下注要钱（松对手爱付钱，多榨价值）。
+//   这些只是"温和的旋钮"，不改变策略主干，拿不到风格时一律用中性值 1 / 0。
 export const OPPONENT_STYLES = [
-  { id: 'random', label: '随机（任意牌）', percent: 100, desc: '不预设对手，把对手当成随便两张牌（最乐观）。' },
-  { id: 'loose', label: '松（爱玩牌）', percent: 85, desc: '对手爱入池、手里牌偏杂。' },
-  { id: 'normal', label: '标准（常规）', percent: 50, desc: '多数休闲局的中间水平（推荐）。' },
-  { id: 'tight', label: '紧（只玩好牌）', percent: 25, desc: '对手只玩较强起手牌，你的胜率更低也更贴近现实。' },
+  {
+    id: 'random',
+    label: '随机（任意牌）',
+    percent: 100,
+    desc: '不预设对手，把对手当成随便两张牌（最乐观）。',
+    decision: { callThreshold: 0, bluffBias: 1, valueStretch: 1 },
+  },
+  {
+    id: 'loose',
+    label: '松（爱玩牌）',
+    percent: 85,
+    desc: '对手爱入池、手里牌偏杂。',
+    // 松对手爱跟注：少诈唬（送钱）、多榨价值、边缘牌跟注门槛抬高一点。
+    decision: { callThreshold: 2, bluffBias: 0.5, valueStretch: 1.2 },
+  },
+  {
+    id: 'normal',
+    label: '标准（常规）',
+    percent: 50,
+    desc: '多数休闲局的中间水平（推荐）。',
+    decision: { callThreshold: 0, bluffBias: 1, valueStretch: 1 },
+  },
+  {
+    id: 'tight',
+    label: '紧（只玩好牌）',
+    percent: 25,
+    desc: '对手只玩较强起手牌，你的胜率更低也更贴近现实。',
+    // 紧对手爱弃牌：诈唬更易成功、可更舍得施压（门槛略降）；但对手一旦来钱要尊重。
+    decision: { callThreshold: -1, bluffBias: 1.6, valueStretch: 0.9 },
+  },
 ];
 
 // 默认对手风格：用"标准"，比纯随机更接近真实牌局。
@@ -136,6 +171,17 @@ export const DEFAULT_OPPONENT_STYLE = 'normal';
 export function getOpponentPercent(styleId) {
   const found = OPPONENT_STYLES.find((s) => s.id === styleId);
   return found ? found.percent : 100;
+}
+
+// 群体画像的"中性值"：拿不到风格、或字段缺失时统一用它，等于"不做任何偏移"。
+//   集中成常量，避免各处散写 {callThreshold:0, bluffBias:1, valueStretch:1}。
+export const NEUTRAL_DECISION_PROFILE = { callThreshold: 0, bluffBias: 1, valueStretch: 1 };
+
+// 小工具：按风格 id 查"决策调节参数"（档位②群体画像用）。
+//   查不到、或该风格没配 decision 时，一律回退中性值，保证策略逻辑不被污染。
+export function getOpponentDecisionProfile(styleId) {
+  const found = OPPONENT_STYLES.find((s) => s.id === styleId);
+  return (found && found.decision) ? found.decision : NEUTRAL_DECISION_PROFILE;
 }
 
 // 牌型等级（数字越大越好）-> 中文名。
@@ -178,29 +224,33 @@ export const POKER_ACTION_NAMES = {
 };
 
 // 策略档位配置（数据驱动）：
-//   id       —— 内部标识，面板下拉用它、decision-engine 按它选策略文件
-//   label    —— 面板显示名
-//   desc     —— 说明，帮你理解这档"大脑"大概怎么想
-//   strategy —— 对应 src/data/strategies/<strategy>-strategy.js 里的实现
-// 现在只实现了档位①(simple)，②③先占位、desc 里标注"开发中"，便于后续扩展。
+//   id        —— 内部标识，面板下拉用它、decision-engine 按它选策略文件
+//   label     —— 面板显示名
+//   desc      —— 说明，帮你理解这档"大脑"大概怎么想
+//   strategy  —— 对应 src/data/strategies/<strategy>-strategy.js 里的实现
+//   available —— 是否已实现、可供选择。false 的档位在面板里置灰、不可选。
+//                （以后把某档写好了，只把这里改成 true，面板自动放开，别处不用动。）
 export const STRATEGY_TIERS = [
   {
     id: 'simple',
     label: '档位①·简单托管',
     desc: '只看胜率和底池赔率：赢面够大就跟/加注，明显不够就弃牌。稳健、好理解。',
     strategy: 'simple',
+    available: true,
   },
   {
     id: 'complex',
-    label: '档位②·复杂判断（开发中）',
-    desc: '在简单规则上叠加听牌、位置、对手人数等因素做更细的取舍。',
+    label: '档位②·复杂判断',
+    desc: '在简单规则上叠加成手牌力、听牌隐含赔率、多人底池、牌面阶段等因素，取舍更细。',
     strategy: 'complex',
+    available: true,
   },
   {
     id: 'gto',
     label: '档位③·策略算法（开发中）',
     desc: '引入接近 GTO 的混合频率与下注尺度，目标是长期能稳定战胜人类。',
     strategy: 'gto',
+    available: false,
   },
 ];
 
@@ -237,6 +287,15 @@ export const AUTOPILOT = {
   // 防重复：同一手牌、同一个决策动作，最短间隔多久才允许再点一次（毫秒）。
   //   防止因为页面状态抖动导致对同一个局面连点好几下。
   ACTION_COOLDOWN_MS: 2500,
+
+  // 「房主·自动开始下一手」默认值：默认【开启】。
+  //   注意：它受总开关管辖——只有托管总开关打开时才会生效，所以默认开也安全。
+  //   作用：房主需要手动点"开始下一手"才能进下一局，这里替房主自动点，避免卡在局间。
+  AUTO_NEXT_HAND: true,
+
+  // "开始下一手"按钮的防重复间隔（毫秒）：比普通动作长一些，
+  //   因为局间状态可能来回抖动，避免对同一个"开始"按钮连点。
+  NEXT_HAND_COOLDOWN_MS: 4000,
 };
 
 // ============ 「动作按钮」DOM 选择器规则 ============
@@ -282,9 +341,32 @@ export const BET_INPUT_RULES = {
   fallbackInputTypes: ['number', 'range', 'text'],
 };
 
+// 「开始下一手 / 开局」按钮识别规则：房主需要点这个按钮才能进下一局。
+//   和动作按钮同一套匹配策略：先 selectors 精确找，找不到按文字兜底。
+//   文案候选尽量覆盖常见写法（开始、下一局、再来一局、Start、Next 等）。
+export const NEXT_HAND_BUTTON_RULES = {
+  selectors: [], // 例如：['[data-action="start"]', '.btn-start-game']，待核对后补
+  textIncludes: [
+    '开始下一手',
+    '开始游戏',
+    '开始',
+    '下一手',
+    '下一局',
+    '再来一局',
+    '继续',
+    'start',
+    'Start',
+    'next',
+    'Next',
+    'deal',
+    'Deal',
+  ],
+};
+
 // 托管状态在 chrome.storage 里的键名（持久化用）。集中成常量，避免各处拼错字符串。
 export const STORAGE_KEYS = {
   AUTOPILOT_ENABLED: 'autopilot_enabled', // 托管开关（true/false）
   STRATEGY_TIER: 'autopilot_strategy_tier', // 选中的策略档位 id
   OPPONENT_STYLE: 'autopilot_opponent_style', // 选中的对手牌力风格 id（决策与胜率共用）
+  AUTO_NEXT_HAND: 'autopilot_auto_next_hand', // 房主：自动开始下一手（true/false）
 };

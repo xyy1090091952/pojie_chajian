@@ -36,6 +36,20 @@ const FOLDED_KEYS = ['folded', 'isFolded', 'fold', 'hasFolded'];
 // 玩家本手已下注、当前最高下注——用于推算"还要跟多少"
 const BET_KEYS = ['bet', 'betAmount', 'currentBet', 'wager', 'street_bet', 'roundBet'];
 const PLAYER_CARDS_KEYS = ['cards', 'hole', 'holeCards', 'hand', 'pocket'];
+// 玩家"剩余筹码"可能的字段名（⚠️ 待核对真实数据再精确）：
+//   不同服务端叫法不一，这里把常见写法都试一遍。抽不到就返回 null，绝不编一个假数值。
+//   用途：给加注额"封顶"，避免中等牌被打成接近全下（防误 all in 的策略层保险）。
+const STACK_KEYS = ['stack', 'chips', 'balance', 'remain', 'remaining', 'stackSize', 'chipCount', 'money'];
+// 盲注结构可能直接放在牌桌对象，也可能包在 blinds/limits/config 里。
+// 只读取明确的大盲字段，不用“小盲×2”等方式猜测，避免错误放宽入池条件。
+const BIG_BLIND_KEYS = ['bigBlind', 'bigBlindAmount', 'big_blind', 'bbAmount', 'blindSize'];
+const BLIND_CONTAINER_KEYS = ['blinds', 'blind', 'limits', 'stakes', 'config'];
+// 玩家"位置"相关字段候选（⚠️ 待核对真实数据再精确）：
+//   有的服务端在玩家对象上直接给位置标签（如 'BTN'/'CO'/'UTG'/'SB'/'BB'），
+//   有的只给一个"庄家按钮在哪个座位"的标记，由前端自己推算。两种都兼容尝试。
+const POSITION_KEYS = ['position', 'pos', 'seatPosition', 'posName', 'positionName'];
+// 标记"这是庄家(按钮位)"的字段候选（值为真表示该玩家是庄）。
+const DEALER_KEYS = ['dealer', 'isDealer', 'button', 'isButton', 'btn'];
 
 /** 在对象里按一组候选 key 取第一个存在的值 */
 function pick(obj, keys) {
@@ -91,6 +105,90 @@ function readPlayerHole(player) {
 }
 
 /**
+ * 把服务端五花八门的"位置写法"归一化成三档：'early' | 'middle' | 'late'。
+ *   —— 策略层只关心"早/中/晚位"这个粗粒度，不关心具体是 UTG 还是 CO。
+ *   —— 认不出来就返回 null（宁可没有，也不编一个误导决策）。
+ * @param {string} raw 原始位置标签（可能是 'BTN'/'SB'/'UTG'/'CO'/中文/数字等）
+ * @returns {'early'|'middle'|'late'|null}
+ */
+function normalizePosition(raw) {
+  if (raw == null) return null;
+  const t = String(raw).trim().toLowerCase();
+  if (!t) return null;
+
+  // 晚位：按钮(BTN)、cutoff(CO)、庄家、后面、late
+  if (/(btn|button|^co$|cutoff|dealer|late|后|庄)/.test(t)) return 'late';
+  // 早位：枪口(UTG)、大/小盲(SB/BB，翻后行动早)、early、前面
+  if (/(utg|^sb$|^bb$|small ?blind|big ?blind|blind|early|前|枪)/.test(t)) return 'early';
+  // 中位：MP / middle / 中
+  if (/(^mp$|middle|^mid|中)/.test(t)) return 'middle';
+
+  return null; // 认不出：不猜
+}
+
+/**
+ * 【防御式】尽量抽取"我自己的位置"（早/中/晚位）。
+ *   拿不到可靠数据时返回 null —— 这是刻意的：没有真实位置数据就不编，
+ *   策略层拿到 null 会自动退回"不看位置"的原逻辑，绝不基于假数据决策。
+ *
+ * 支持两种数据形态：
+ *   1) 玩家对象上直接带位置标签（position/pos/...）→ 归一化返回。
+ *   2) 只有"谁是庄家"的标记：若我自己被标为庄家 → 'late'；否则信息不足 → null
+ *      （不去推算其它人具体位置，避免不准）。
+ * @param {object} heroPlayer 已识别出的"我"的玩家对象
+ * @returns {'early'|'middle'|'late'|null}
+ */
+function extractHeroPosition(heroPlayer) {
+  if (!heroPlayer || typeof heroPlayer !== 'object') return null;
+
+  // 形态 1：直接给了位置标签
+  const posRaw = pick(heroPlayer, POSITION_KEYS);
+  const normalized = normalizePosition(posRaw);
+  if (normalized) return normalized;
+
+  // 形态 2：只给了"是不是庄家"
+  const dealer = pick(heroPlayer, DEALER_KEYS);
+  if (dealer === true) return 'late';
+
+  // 其它情况：信息不足，不猜
+  return null;
+}
+
+/**
+ * 【防御式】抽取"我的剩余筹码"。
+ *   抽不到 / 不是正数时返回 null —— 和位置一样，没有真实数据就不编，
+ *   策略层拿到 null 会退回"不按筹码封顶"的保守倍数逻辑，绝不基于假筹码决策。
+ * @param {object} heroPlayer 已识别出的"我"的玩家对象
+ * @returns {number|null} 正数筹码；拿不到返回 null
+ */
+function extractHeroStack(heroPlayer) {
+  if (!heroPlayer || typeof heroPlayer !== 'object') return null;
+  const raw = pick(heroPlayer, STACK_KEYS);
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return null; // 0/负/NaN 都当"没拿到"
+  return n;
+}
+
+/**
+ * 【防御式】抽取本桌大盲金额。
+ *   只接受服务端明确给出的正数；拿不到返回 null，不根据底池或玩家下注额猜测。
+ * @param {object} view 当前牌桌状态
+ * @returns {number|null}
+ */
+function extractBigBlind(view) {
+  const direct = Number(pick(view, BIG_BLIND_KEYS));
+  if (Number.isFinite(direct) && direct > 0) return direct;
+
+  for (const key of BLIND_CONTAINER_KEYS) {
+    const container = view?.[key];
+    if (!container || typeof container !== 'object') continue;
+    const nested = Number(pick(container, BIG_BLIND_KEYS));
+    if (Number.isFinite(nested) && nested > 0) return nested;
+  }
+  return null;
+}
+
+/**
  * 【对外主函数】从全部抓包记录里，抽取"最新一帧"的局面上下文。
  * @param {Array} records message-store 里的全部记录（panel 的 state.records）
  * @returns {{ok:boolean, reason?:string, hole?, board?, opponents?, pot?, toCall?, signature?}}
@@ -127,9 +225,11 @@ export function extractGameState(records) {
 
   // —— 找到我自己、拿底牌 ——
   let hole = [];
+  let heroPlayer = null; // 记住"我"的玩家对象，后面抽位置要用
   for (const p of players) {
     if (isHero(p, viewerId)) {
       hole = readPlayerHole(p);
+      heroPlayer = p;
       break;
     }
   }
@@ -156,10 +256,22 @@ export function extractGameState(records) {
   // —— 待跟注：全场最高下注 - 我已下注（取不到就当 0）——
   const toCall = computeToCall(players, viewerId);
 
-  // 局面指纹：底牌+公共牌+对手数+底池+待跟注，任一变化才需重算
-  const signature = [hole.join(','), board.join(','), opponents, pot, toCall].join('|');
+  // —— 我的位置（早/中/晚位）：防御式抽取，拿不到为 null，策略会据此退回原逻辑 ——
+  const position = extractHeroPosition(heroPlayer);
 
-  return { ok: true, hole, board, opponents, pot, toCall, signature };
+  // —— 我的剩余筹码：防御式抽取，拿不到为 null，策略会退回保守封顶（防误全下）——
+  const stack = extractHeroStack(heroPlayer);
+
+  // —— 大盲金额：用于翻牌前判断“只跟一个盲注是否便宜”，拿不到为 null ——
+  const bigBlind = extractBigBlind(view);
+
+  // 局面指纹：关键数据任一变化才需重算。
+  const signature = [
+    hole.join(','), board.join(','), opponents, pot, toCall,
+    position || '-', stack ?? '-', bigBlind ?? '-',
+  ].join('|');
+
+  return { ok: true, hole, board, opponents, pot, toCall, position, stack, bigBlind, signature };
 }
 
 /**
@@ -194,4 +306,9 @@ export const STATE_FIELD_KEYS = {
   FOLDED_KEYS,
   BET_KEYS,
   PLAYER_CARDS_KEYS,
+  STACK_KEYS,
+  BIG_BLIND_KEYS,
+  BLIND_CONTAINER_KEYS,
+  POSITION_KEYS,
+  DEALER_KEYS,
 };

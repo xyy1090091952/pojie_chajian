@@ -24,16 +24,18 @@ import {
   getOpponentPercent,
 } from '../common/constants.js';
 import { simulateEquity } from './equity-engine.js';
+import { buildOpponentModel } from './opponent-model.js';
 
 // 各策略实现：按"策略名 -> 决策函数"登记。
-//   新增策略时在这里加一行即可（档位②③的实现文件后续补上，先只接 simple）。
+//   新增策略时在这里加一行即可（档位③的实现文件后续补上）。
 import { decide as simpleDecide } from './strategies/simple-strategy.js';
+import { decide as complexDecide } from './strategies/complex-strategy.js';
 
 // 策略注册表：key 对应 STRATEGY_TIERS[].strategy 字段。
 //   暂未实现的档位先不登记，运行时会回退到 simple 并在 reason 里说明。
 const STRATEGY_REGISTRY = {
   simple: simpleDecide,
-  // complex: complexDecide,  // 档位②，待实现
+  complex: complexDecide, // 档位②·复杂判断
   // gto: gtoDecide,          // 档位③，待实现
 };
 
@@ -44,7 +46,9 @@ const STRATEGY_REGISTRY = {
  *   @param {string} [config.tier]            策略档位 id（默认取档位配置里的默认档）
  *   @param {string} [config.opponentStyle]   对手风格 id（用于设定对手牌力，影响胜率）
  *   @param {number} [config.simulations]     可选：覆盖模拟次数（测试时可调小加速）
- * @returns {{ok:boolean, reason?:string, action?:string, amount?:number, tier?:string, equity?:object}}
+ *   @param {Array}  [config.records]         可选：全部抓包记录。传入时会"边打边记"构建对手档案，
+ *                                            在你没主动选风格（用默认档）且观察可靠时，用观察结果覆盖。
+ * @returns {{ok:boolean, reason?:string, action?:string, amount?:number, tier?:string, equity?:object, opponentModel?:object}}
  */
 export function decide(ctx, config = {}) {
   // 1) 局面必须有效（有底牌等）。无效直接返回"不托管"，由上层决定如何提示。
@@ -55,8 +59,26 @@ export function decide(ctx, config = {}) {
   // 2) 解析配置档位（查不到会回退到默认档，保证不崩）。
   const tierConf = getStrategyTier(config.tier);
 
-  // 3) 先算胜率（决策的核心依据）。对手牌力按配置的风格来，默认"标准"。
-  const opponentStyle = config.opponentStyle || DEFAULT_OPPONENT_STYLE;
+  // 2.5) 决定本手用哪个"对手风格"：
+  //   - 基线 = 你手选的风格（没选则默认「标准」）。
+  //   - 若传入了 records（边打边记），且你用的就是默认档（等于"没主见"），
+  //     并且观察样本够多够可靠，就用机器人自己观察出的隐含风格覆盖基线。
+  //   - 你一旦手动选了非默认风格，就【尊重你的选择】，不自作主张（数据一致性 + 可预期）。
+  const chosenStyle = config.opponentStyle || DEFAULT_OPPONENT_STYLE;
+  let opponentStyle = chosenStyle;
+  let opponentModel = null;
+  let modelNote = '';
+
+  if (Array.isArray(config.records)) {
+    opponentModel = buildOpponentModel(config.records);
+    const userUsedDefault = !config.opponentStyle || config.opponentStyle === DEFAULT_OPPONENT_STYLE;
+    if (userUsedDefault && opponentModel.reliable && opponentModel.impliedStyle) {
+      opponentStyle = opponentModel.impliedStyle; // 用观察结果覆盖默认档
+      modelNote = `（已据 ${opponentModel.handsSeen} 手观察，自动按「${opponentStyle}」桌打）`;
+    }
+  }
+
+  // 3) 先算胜率（决策的核心依据）。对手牌力按上面定好的风格来。
   const eq = simulateEquity({
     hole: ctx.hole,
     board: ctx.board,
@@ -77,15 +99,18 @@ export function decide(ctx, config = {}) {
   }
 
   // 5) 交给策略决策，拿到标准化动作结果。
-  const result = strategyFn({ ctx, eq });
+  //    把 opponentStyle 一并传入：档位②会据此做"群体默认画像"的温和偏移
+  //    （松桌多价值少诈唬、紧桌敢施压）。简单档不读这个字段，多传无害。
+  const result = strategyFn({ ctx, eq, opponentStyle });
 
-  // 6) 组装统一返回：带上档位、胜率，方便面板展示与日志。
+  // 6) 组装统一返回：带上档位、胜率、对手档案，方便面板展示与日志。
   return {
     ok: true,
     tier: tierConf.id,
     action: result.action || POKER_ACTION.CHECK,
     amount: Number(result.amount) || 0,
-    reason: (result.reason || '') + fallbackNote,
+    reason: (result.reason || '') + modelNote + fallbackNote,
     equity: eq, // 把胜率一起带出来，面板可直接显示，不必再算一遍
+    opponentModel, // 对手档案（可能为 null/不可靠），面板可选择性展示
   };
 }

@@ -40,11 +40,35 @@
       </div>
       <p id="tierDesc" class="autopilot__desc"></p>
 
+      <!-- 房主专用开关：局间自动点"开始下一手"，避免卡在两局之间。
+           只有托管总开关打开时才生效，所以默认开着也安全。 -->
+      <div class="autopilot__row autopilot__row--switch">
+        <label for="autoNextHand" class="autopilot__label">
+          自动开始下一手
+          <span class="autopilot__hint">（房主：局间自动开下一局）</span>
+        </label>
+        <label class="switch">
+          <input type="checkbox" id="autoNextHand" />
+          <span class="switch__slider"></span>
+        </label>
+      </div>
+
       <!-- 最近一次自动动作（没动作时隐藏） -->
       <div id="lastAction" class="last-action" hidden>
         <span class="last-action__badge" id="lastActionBadge">—</span>
         <span class="last-action__reason" id="lastActionReason"></span>
       </div>
+    </section>
+
+    <!-- 对手档案（边打边记）：机器人自己观察出的桌面风格。
+         ⚠️ 只有能从数据流稳定拿到"手牌编号+本人身份"时才给结论，
+         拿不到就老实显示"数据不足"，绝不编造（和决策层同一条红线）。 -->
+    <section class="oppmodel">
+      <div class="oppmodel__head">
+        <span class="oppmodel__title">对手档案</span>
+        <span class="oppmodel__hint">（边打边记）</span>
+      </div>
+      <div id="oppmodelBody" class="oppmodel__body">观察中…</div>
     </section>
 
 

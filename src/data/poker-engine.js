@@ -39,6 +39,31 @@ export const HAND_RANK = {
 
 const ALL_SUITS = ['s', 'h', 'd', 'c']; // 黑桃 红心 方块 梅花
 
+// 牌面湿度分级（干 / 中 / 湿）。导出成枚举常量，策略层直接按它判断，不写字符串字面量。
+export const BOARD_TEXTURE = {
+  DRY: 'dry', // 干：没花、不连，一对也相对安全
+  MEDIUM: 'medium', // 中：有一点威胁
+  WET: 'wet', // 湿：同花/顺子/对子威胁大，容易被反超
+};
+
+// 牌面危险度"打分权重"与"分级阈值"（集中成常量，便于调参，和判断逻辑解耦）。
+//   每一项代表某种威胁贡献多少"危险分"，最后把分数和下面两个阈值比，得出干/中/湿。
+const BOARD_TEXTURE_WEIGHTS = {
+  // 同花威胁：面上同色张数越多越危险
+  FLUSH_THREE: 2, // 3 张同色（同花听面）
+  FLUSH_FOUR: 4, // 4 张同色（极易成同花）
+  FLUSH_MADE: 5, // 5 张同色（面上已成同花）
+  // 顺子威胁：牌面点数越"连"越危险
+  STRAIGHT_TWO: 1, // 只两张沾边（弱连）
+  STRAIGHT_THREE: 2, // 3 张连张（顺子听牌活跃）
+  STRAIGHT_FOUR: 4, // 4 张高度连张（顺子威胁极大）
+  // 对子牌面：可能已有三条/葫芦
+  PAIRED: 2,
+  // 分级阈值：危险分 >= WET_AT 判"湿"；>= MEDIUM_AT 判"中"；否则"干"。
+  MEDIUM_AT: 2,
+  WET_AT: 4,
+};
+
 /**
  * 把一张牌字符串解析成 { r:点数数字, s:花色字母 }，解析不了返回 null。
  * 兼容大小写、"10" 和 "T" 两种十的写法。
@@ -256,4 +281,125 @@ export function detectDraws(known) {
   }
 
   return hints;
+}
+
+/**
+ * 牌面"湿/干"分级（也叫牌面危险度 / board texture）。
+ * ------------------------------------------------------------
+ * 讲人话：同样是你一对，公共牌"干"（如 K♠7♦2♣，没花、不连）时很安全；
+ *   公共牌"湿"（如 K♥Q♥J♥，又同花又连张）时，对手很容易已经成了更大的牌、
+ *   或者手握一堆听牌随时反超你。所以"要不要下注保护、下多大"要看牌面湿度。
+ *
+ * 为什么放在 poker-engine（最底层纯计算）：
+ *   它只用公共牌本身做数学判断，不碰胜率、不碰策略，属于"扑克数学"的一部分，
+ *   和 evaluate / detectDraws 同层，可被任何上层（策略、面板）复用。
+ *
+ * 判断的三个来源（都只看公共牌，不看任何人的底牌）：
+ *   1) 同花威胁：同一花色在牌面上有几张（3 张=听面活跃，4 张=极危险，5 张=面上已成同花）。
+ *   2) 顺子威胁：牌面点数有多"连"（一个 5 点数窗口里挤了几张，越挤越容易凑顺子）。
+ *   3) 对子牌面：牌面本身成对时，有人可能已中三条/葫芦。
+ *
+ * @param {Array<string|{r,s}>} board 已翻开的公共牌（0~5 张）
+ * @returns {{
+ *   level: 'dry'|'medium'|'wet',  // 湿度分级（供策略直接用）
+ *   score: number,                // 内部打的危险分（越大越湿，便于调参/调试）
+ *   flushRisk: 'none'|'draw'|'strong'|'made',   // 同花威胁等级
+ *   straightRisk: 'none'|'draw'|'strong'|'made',// 顺子威胁等级
+ *   paired: boolean,              // 牌面是否成对
+ *   reasons: string[]             // 中文解释（可用于界面/日志，透明可核对）
+ * }}
+ */
+export function analyzeBoardTexture(board) {
+  const list = (Array.isArray(board) ? board : [])
+    .map((c) => (typeof c === 'string' ? parseCard(c) : c))
+    .filter(Boolean);
+
+  // 翻牌前 / 牌面不足 3 张：谈不上危险，直接当"干"返回（防御式，避免上层拿到脏值）。
+  if (list.length < 3) {
+    return {
+      level: BOARD_TEXTURE.DRY,
+      score: 0,
+      flushRisk: 'none',
+      straightRisk: 'none',
+      paired: false,
+      reasons: ['牌面未成形（不足 3 张公共牌）'],
+    };
+  }
+
+  const reasons = [];
+
+  // —— 1) 同花威胁：数每种花色在牌面上出现几张，取最多的那种 ——
+  const suitCount = { s: 0, h: 0, d: 0, c: 0 };
+  for (const { s } of list) suitCount[s]++;
+  const maxSuit = Math.max(...ALL_SUITS.map((s) => suitCount[s]));
+
+  let flushRisk = 'none';
+  let flushScore = 0;
+  if (maxSuit >= 5) {
+    flushRisk = 'made'; // 面上就有 5 张同花，谁手里有这花色就是同花
+    flushScore = BOARD_TEXTURE_WEIGHTS.FLUSH_MADE;
+    reasons.push('牌面已有同花（5 张同色）');
+  } else if (maxSuit === 4) {
+    flushRisk = 'strong'; // 4 张同色，任何人只要有 1 张这花色就成同花，极危险
+    flushScore = BOARD_TEXTURE_WEIGHTS.FLUSH_FOUR;
+    reasons.push('牌面 4 张同色，极易成同花');
+  } else if (maxSuit === 3) {
+    flushRisk = 'draw'; // 3 张同色，有同花听牌/两张同色即成同花
+    flushScore = BOARD_TEXTURE_WEIGHTS.FLUSH_THREE;
+    reasons.push('牌面 3 张同色，同花威胁活跃');
+  }
+
+  // —— 2) 顺子威胁：看牌面点数有多"连" ——
+  //   做法：把点数去重（A 既算 14 也算 1，兼顾 A-2-3-4-5），
+  //   找"任意连续 5 个点数的窗口里，最多塞进了几张牌面点数"。塞得越多越容易凑顺子。
+  const rankSet = new Set(list.map((c) => c.r));
+  if (rankSet.has(14)) rankSet.add(1); // A 当小牌用
+  const ranks = [...rankSet];
+
+  let maxInWindow = 0; // 最密的 5 点数窗口里有几张不同点数
+  for (let start = 1; start <= 10; start++) {
+    const end = start + 4;
+    const cnt = ranks.filter((r) => r >= start && r <= end).length;
+    if (cnt > maxInWindow) maxInWindow = cnt;
+  }
+  // 另外单独判断"是否存在两张点数靠得很近（差 <=2，即连张或隔一张）"，用于弱连面
+  let twoConnected = false;
+  for (let i = 0; i < ranks.length; i++) {
+    for (let j = i + 1; j < ranks.length; j++) {
+      if (Math.abs(ranks[i] - ranks[j]) <= 2) twoConnected = true;
+    }
+  }
+
+  let straightRisk = 'none';
+  let straightScore = 0;
+  if (maxInWindow >= 4) {
+    straightRisk = 'made'; // 牌面 4 张落在一个顺子窗口，极易有人已成顺或大听牌
+    straightScore = BOARD_TEXTURE_WEIGHTS.STRAIGHT_FOUR;
+    reasons.push('牌面高度连张，顺子威胁极大');
+  } else if (maxInWindow === 3) {
+    straightRisk = 'strong'; // 3 张连张面，顺子听牌很多
+    straightScore = BOARD_TEXTURE_WEIGHTS.STRAIGHT_THREE;
+    reasons.push('牌面连张，顺子听牌活跃');
+  } else if (twoConnected) {
+    straightRisk = 'draw'; // 只有两张沾边，威胁较弱
+    straightScore = BOARD_TEXTURE_WEIGHTS.STRAIGHT_TWO;
+    reasons.push('牌面略带连张');
+  }
+
+  // —— 3) 对子牌面：面上成对，可能有人已中三条/葫芦 ——
+  const rankCount = {};
+  for (const { r } of list) rankCount[r] = (rankCount[r] || 0) + 1;
+  const paired = Object.values(rankCount).some((n) => n >= 2);
+  const pairScore = paired ? BOARD_TEXTURE_WEIGHTS.PAIRED : 0;
+  if (paired) reasons.push('牌面成对，可能有三条/葫芦');
+
+  // —— 汇总打分 -> 分级 ——
+  const score = flushScore + straightScore + pairScore;
+  let level = BOARD_TEXTURE.DRY;
+  if (score >= BOARD_TEXTURE_WEIGHTS.WET_AT) level = BOARD_TEXTURE.WET;
+  else if (score >= BOARD_TEXTURE_WEIGHTS.MEDIUM_AT) level = BOARD_TEXTURE.MEDIUM;
+
+  if (reasons.length === 0) reasons.push('牌面干燥，威胁较小');
+
+  return { level, score, flushRisk, straightRisk, paired, reasons };
 }

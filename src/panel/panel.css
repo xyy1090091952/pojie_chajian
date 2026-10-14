@@ -92,6 +92,13 @@ body {
   gap: 8px;
   margin-top: 10px;
 }
+/* 带开关的行：label 占满左侧、开关靠右，和"自动托管"总开关对齐风格一致 */
+.autopilot__row--switch {
+  justify-content: space-between;
+}
+.autopilot__row--switch .autopilot__label {
+  flex: 1 1 auto;
+}
 .autopilot__label {
   color: #9aa3b0;
   font-size: 12px;
@@ -102,6 +109,40 @@ body {
   font-size: 11px;
   line-height: 1.5;
   margin-top: 6px;
+}
+
+/* 对手档案卡片：和自动托管卡片同一视觉语言（深色块 + 圆角），作为其下方的辅助信息。 */
+.oppmodel {
+  margin: 10px 12px 0;
+  padding: 10px 12px;
+  background: #1a1d24;
+  border-radius: 10px;
+}
+.oppmodel__head {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+.oppmodel__title {
+  font-weight: 600;
+  font-size: 13px;
+  color: #e6e6e6;
+}
+.oppmodel__hint {
+  font-weight: 400;
+  font-size: 11px;
+  color: #6b7280;
+}
+.oppmodel__body {
+  margin-top: 6px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #9aa3b0; /* 默认（观察中/数据不足）用灰色，表示"还没结论" */
+}
+/* 已学到可靠结论时高亮：绿色更醒目，一眼看出机器人已按观察到的桌面风格打。 */
+.oppmodel__body--active {
+  color: #3ddc84;
+  font-weight: 600;
 }
 
 /* 开关滑块（纯 CSS，用 checkbox 驱动） */
