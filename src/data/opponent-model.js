@@ -19,7 +19,7 @@
  */
 
 import { parseCards } from './card-parser.js';
-import { DIRECTION } from '../common/constants.js';
+import { DIRECTION, DEFAULT_OPPONENT_STYLE } from '../common/constants.js';
 import { STATE_FIELD_KEYS } from './game-state.js';
 
 // ============ 本模块专用阈值与字段候选（集中成常量，便于调参，和逻辑解耦） ============
@@ -228,6 +228,40 @@ function toSeatsObject(seatStats) {
     };
   }
   return out;
+}
+
+/**
+ * 【共享决策】最终该用哪个"对手画像"？—— 面板和托管共用同一条规则（单一数据源）。
+ * ------------------------------------------------------------
+ * 为什么要抽出来（讲人话）：
+ *   以前"用手选的还是用自动观察的"这段判断，面板和决策引擎各写了一份，
+ *   很容易改歪、导致"面板显示的胜率"和"机器人实际按的画像"对不上。
+ *   现在把它收成一个纯函数，两边都调它，结论永远一致。
+ *
+ * 规则（和产品约定一致）：
+ *   1) 你一旦手动选了【非默认】风格（松/紧/随机）=> 永远尊重你的选择，机器人不插手；
+ *   2) 你用的是默认「标准」(等于"没主见")，且边打边记的样本够多够可靠 => 用观察结果覆盖；
+ *   3) 其余情况（样本不足/数据拿不到）=> 退回你手选的（此时就是默认「标准」）。
+ *
+ * @param {string} chosenStyle 用户手选的风格 id（面板下拉的值）
+ * @param {object|null} model   buildOpponentModel 的结果（可为 null）
+ * @returns {{
+ *   style:string,        // 最终生效的风格 id（喂给胜率/策略）
+ *   source:'auto'|'manual', // 这个风格的来源：auto=机器人观察接管，manual=你手选
+ *   overridden:boolean,  // 是否发生了"自动覆盖默认档"
+ *   model:(object|null), // 原样带出档案，方便上层展示
+ * }}
+ */
+export function resolveOpponentStyle(chosenStyle, model) {
+  const style = chosenStyle || DEFAULT_OPPONENT_STYLE;
+  // "没主见" = 没选 或 选的就是默认档，这时才允许自动画像接管。
+  const userUsedDefault = !chosenStyle || chosenStyle === DEFAULT_OPPONENT_STYLE;
+  const canAuto = Boolean(userUsedDefault && model && model.reliable && model.impliedStyle);
+
+  if (canAuto) {
+    return { style: model.impliedStyle, source: 'auto', overridden: true, model };
+  }
+  return { style, source: 'manual', overridden: false, model: model || null };
 }
 
 // 导出常量集合，方便调试/单测时引用同一套阈值与字段名。

@@ -112,30 +112,79 @@ body {
 }
 
 /* 对手档案卡片：和自动托管卡片同一视觉语言（深色块 + 圆角），作为其下方的辅助信息。 */
-.oppmodel {
+/* ============ 对手画像状态卡 ============ */
+.picture {
   margin: 10px 12px 0;
   padding: 10px 12px;
   background: #1a1d24;
   border-radius: 10px;
 }
-.oppmodel__head {
+.picture__head {
   display: flex;
-  align-items: baseline;
-  gap: 6px;
+  align-items: center;
+  justify-content: space-between;
 }
-.oppmodel__title {
+.picture__title {
   font-weight: 600;
   font-size: 13px;
   color: #e6e6e6;
 }
-.oppmodel__hint {
-  font-weight: 400;
+/* 来源徽标：默认（你手选）用中性灰底；机器人接管时切成绿色，突出"已自动学习"。 */
+.picture__source {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 999px;
+  color: #c7cdd6;
+  background: #2a2f3a;
+}
+.picture__source--auto {
+  color: #0d1f14;
+  background: #3ddc84;
+}
+/* 主行：左边"当前生效 + 风格名"，右边"改回自动"按钮。 */
+.picture__main {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-top: 8px;
+}
+.picture__label {
   font-size: 11px;
   color: #6b7280;
 }
+.picture__style {
+  font-size: 16px;
+  font-weight: 700;
+  color: #e6e6e6;
+}
+/* "改回自动"按钮：靠右，低调但可点；hidden 时由 JS 控制隐藏。 */
+.picture__reset {
+  margin-left: auto;
+  font-size: 11px;
+  color: #8ab4ff;
+  background: transparent;
+  border: 1px solid #3a4150;
+  border-radius: 6px;
+  padding: 3px 8px;
+  cursor: pointer;
+}
+.picture__reset:hover {
+  border-color: #8ab4ff;
+}
+.picture__hint {
+  margin: 6px 0 0;
+  font-size: 11px;
+  line-height: 1.5;
+  color: #9aa3b0;
+}
+
+/* 边打边记的观察明细：作为状态卡内的一行小字（顶部细分隔线和上面的解释区隔开）。 */
 .oppmodel__body {
-  margin-top: 6px;
-  font-size: 12px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid #2a2f3a;
+  font-size: 11px;
   line-height: 1.5;
   color: #9aa3b0; /* 默认（观察中/数据不足）用灰色，表示"还没结论" */
 }

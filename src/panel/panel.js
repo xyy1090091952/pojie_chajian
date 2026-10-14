@@ -34,13 +34,17 @@ import {
 import { extractGameState } from '../data/game-state.js';
 import { simulateEquity } from '../data/equity-engine.js';
 import { evaluate, handName, detectDraws, parseCard } from '../data/poker-engine.js';
-import { buildOpponentModel } from '../data/opponent-model.js';
+import { buildOpponentModel, resolveOpponentStyle } from '../data/opponent-model.js';
 
 // ============ 本地状态 ============
 const state = {
   records: [], // 全部抓包消息（唯一数据源）
   signature: '', // 上次算过的"局面指纹"，相同则跳过重算
-  opponentStyle: DEFAULT_OPPONENT_STYLE, // 当前选中的对手风格 id（影响胜率高低）
+  opponentStyle: DEFAULT_OPPONENT_STYLE, // 你手选的对手风格 id（下拉框的值）
+  // —— 下面三个是"算出来的派生状态"，由 refreshOpponentPicture 统一刷新，别处只读不写 ——
+  opponentModel: null, // 边打边记的最新档案（可能 null/不可靠）
+  effectiveStyle: DEFAULT_OPPONENT_STYLE, // 最终生效的风格（喂给胜率）：手选 or 自动接管
+  pictureSource: 'manual', // 生效风格来源：'manual'=你手选 / 'auto'=机器人观察接管
 };
 
 // ============ DOM 引用（集中获取） ============
@@ -76,7 +80,12 @@ const dom = {
   draws: document.getElementById('draws'),
   samples: document.getElementById('samples'),
   noteStyle: document.getElementById('noteStyle'), // 底部说明里的"按xx牌力估算"
-  oppmodelBody: document.getElementById('oppmodelBody'), // 对手档案展示区
+  // —— 对手画像状态卡（手选 + 边打边记 的统一展示） ——
+  oppmodelBody: document.getElementById('oppmodelBody'), // 档案详情（观察手数/入池率/原因）
+  pictureSource: document.getElementById('pictureSource'), // 来源徽标：你手选 / 机器人接管
+  pictureStyle: document.getElementById('pictureStyle'), // 当前生效风格名（大字）
+  pictureHint: document.getElementById('pictureHint'), // 一句话解释 + 怎么改回来
+  pictureReset: document.getElementById('pictureReset'), // "改回自动"快捷按钮（仅手选时显示）
 };
 
 // ============ 对手风格下拉框：初始化 + 切换时重算 ============
@@ -96,7 +105,15 @@ function initStyleSelector() {
     // 同步写入 storage：托管决策（后台）也要用同一个对手风格，保证"面板显示"和"托管决策"一致。
     chrome.storage.local.set({ [STORAGE_KEYS.OPPONENT_STYLE]: state.opponentStyle });
     updateStyleDesc();
+    refreshOpponentPicture(); // 重新判定"生效画像"并刷新状态卡
     scheduleCompute();
+  });
+
+  // 3) “改回自动”按钮：把下拉还原成默认档，等于把判断权交还给机器人（边打边记）。
+  //    复用下拉的 change 处理：直接改 value 再手动触发一次，逻辑不重复。
+  dom.pictureReset.addEventListener('click', () => {
+    dom.opponentStyle.value = DEFAULT_OPPONENT_STYLE;
+    dom.opponentStyle.dispatchEvent(new Event('change')); // 复用上面那套状态同步
   });
 }
 
@@ -104,6 +121,12 @@ function initStyleSelector() {
 function updateStyleDesc() {
   const cur = OPPONENT_STYLES.find((s) => s.id === state.opponentStyle);
   dom.styleDesc.textContent = cur ? cur.desc : '';
+}
+
+// 小工具：按风格 id 取中文名（查不到就原样返回 id，保证不崩）。
+function styleLabel(styleId) {
+  const found = OPPONENT_STYLES.find((s) => s.id === styleId);
+  return found ? found.label : styleId;
 }
 
 // ============ 自动托管：开关 + 档位配置（独立 UI 块，和胜率展示解耦） ============
@@ -161,6 +184,7 @@ function initAutopilot() {
       state.opponentStyle = style;
       dom.opponentStyle.value = style;
       updateStyleDesc();
+      refreshOpponentPicture(); // 回填后立刻刷新状态卡，保证初始展示就正确
     }
   );
 
@@ -254,16 +278,64 @@ function showLastAction(acted) {
   dom.lastActionReason.textContent = `${acted.reason || ''}${eqText}`;
 }
 
-// ============ 对手档案（边打边记）展示 ============
-// 独立于胜率计算：每次有新数据就刷新一次，让你看到机器人"学"到了什么。
-//   展示逻辑完全信任数据层 buildOpponentModel 的结论（含诚实降级）：
-//   - reliable=true  => 高亮，显示判定出的桌面风格 + 入池率。
-//   - reliable=false => 普通样式，显示"数据不足/观察中"的原因（不编结论）。
-function renderOpponentModel() {
-  const model = buildOpponentModel(state.records); // model.reason 已是人话
-  dom.oppmodelBody.textContent = model.reason || '观察中…';
-  // 可靠时加高亮类，让"已学到结论"一眼可辨（样式在 panel.css）。
-  dom.oppmodelBody.classList.toggle('oppmodel__body--active', model.reliable === true);
+// ============ 对手画像状态卡：手选 + 边打边记 的统一展示 ============
+// 为什么合并（讲人话）：
+//   "你手选的画像"和"机器人边打边记学到的画像"本是同一件事的两种来源，
+//   以前分两块显示，用户看不出谁在生效、也不知道去哪改。现在收成一张状态卡：
+//     1) 用共享函数 resolveOpponentStyle 算出"此刻真正生效的是哪个画像、来自哪里"；
+//     2) 把结果写进 state（派生状态单一来源），胜率计算直接复用，保证面板=托管；
+//     3) 卡片顶部用徽标点明来源（你手选 / 机器人接管），并给出"改回来"的入口。
+//
+// 注意：这里只负责"刷新状态 + 渲染"，不触发胜率重算（由调用方决定），职责单一。
+function refreshOpponentPicture() {
+  // 1) 跑一遍边打边记（跨多手统计，和当前这手是否 ok 无关）。
+  const model = buildOpponentModel(state.records);
+  // 2) 用和托管【完全相同】的规则，算出最终生效的风格与来源（唯一真相）。
+  const resolved = resolveOpponentStyle(state.opponentStyle, model);
+
+  // 3) 写回派生状态：后续算胜率只认 effectiveStyle，彻底消除"面板和托管对不上"。
+  state.opponentModel = model;
+  state.effectiveStyle = resolved.style;
+  state.pictureSource = resolved.source;
+
+  renderPictureCard(resolved);
+}
+
+// 把"生效画像"的结论渲染成状态卡（纯展示，数据来自 refreshOpponentPicture 的结论）。
+function renderPictureCard(resolved) {
+  const isAuto = resolved.source === 'auto';
+  const model = resolved.model;
+
+  // —— 顶部徽标：一眼看出现在听谁的 ——
+  dom.pictureSource.textContent = isAuto ? '机器人接管' : '你手选';
+  dom.pictureSource.classList.toggle('picture__source--auto', isAuto);
+
+  // —— 中间大字：当前真正生效的风格名 ——
+  dom.pictureStyle.textContent = styleLabel(resolved.style);
+
+  // —— 一句话解释：说清"为什么是它"，并指明怎么改 ——
+  if (isAuto) {
+    // 机器人接管：说明它观察了多少手、怎么判的；并告诉用户想接管就手动改下拉。
+    dom.pictureHint.textContent =
+      `机器人已观察够样本，自动按此画像计算。想自己定？在上方“对手牌力”里手动选即可。`;
+  } else if (state.opponentStyle === DEFAULT_OPPONENT_STYLE) {
+    // 手选=默认档，但自动还没接管：解释差多少手、现在先用默认。
+    dom.pictureHint.textContent = model && model.reason
+      ? `${model.reason}；暂按你选的「${styleLabel(resolved.style)}」计算。`
+      : `样本积累中，暂按你选的「${styleLabel(resolved.style)}」计算。`;
+  } else {
+    // 手选=非默认档：机器人完全不插手，尊重你的选择。
+    dom.pictureHint.textContent =
+      `已尊重你手选的「${styleLabel(resolved.style)}」，机器人不自动接管。想交还机器人？点右侧“改回自动”。`;
+  }
+
+  // —— “改回自动”按钮：只有你手选了非默认档时才有意义（给个一键还原的入口）——
+  const canReset = !isAuto && state.opponentStyle !== DEFAULT_OPPONENT_STYLE;
+  dom.pictureReset.hidden = !canReset;
+
+  // —— 详情行：边打边记的原始观察（观察手数/入池率/原因），没有就留观察中 ——
+  dom.oppmodelBody.textContent = (model && model.reason) || '观察中…';
+  dom.oppmodelBody.classList.toggle('oppmodel__body--active', isAuto);
 }
 
 // ============ 启动：先把对手风格下拉框建好 ============
@@ -300,8 +372,9 @@ function scheduleCompute() {
 }
 
 function compute() {
-  // 0) 先刷新"对手档案"（跨多手统计，和当前这手是否 ok 无关，所以放最前、无条件执行）
-  renderOpponentModel();
+  // 0) 先刷新"对手画像状态卡"：算出此刻真正生效的画像与来源（写入 state.effectiveStyle）。
+  //    放最前、无条件执行：它跨多手统计，和当前这手是否 ok 无关。
+  refreshOpponentPicture();
 
   // 1) 从抓包数据里抽出当前局面（数据层负责认字段、容错）
   const ctx = extractGameState(state.records);
@@ -315,12 +388,14 @@ function compute() {
   state.signature = ctx.signature;
 
   // 3) 算胜率（蒙特卡洛模拟）
-  //    opponentPercent：按当前"对手风格"假设对手只玩多强的牌，范围越窄你的胜率越低、越真实。
+  //    opponentPercent：按【当前真正生效的画像】假设对手只玩多强的牌。
+  //    关键：这里用 state.effectiveStyle（可能是你手选的，也可能是机器人接管的），
+  //    和托管决策引擎走的是同一条规则，保证"面板看到的胜率"="机器人用的胜率"。
   const eq = simulateEquity({
     hole: ctx.hole,
     board: ctx.board,
     opponents: ctx.opponents,
-    opponentPercent: getOpponentPercent(state.opponentStyle),
+    opponentPercent: getOpponentPercent(state.effectiveStyle),
   });
   if (!eq.ok) {
     showEmpty(eq.reason);
@@ -357,9 +432,11 @@ function render(ctx, eq) {
   dom.lose.textContent = eq.lose;
   dom.samples.textContent = eq.samples.toLocaleString('zh-CN');
 
-  // —— 底部说明：按当前对手风格实时更新文案（让你知道这个数字的前提）——
-  const curStyle = OPPONENT_STYLES.find((s) => s.id === state.opponentStyle);
-  dom.noteStyle.textContent = curStyle ? `按"对手${curStyle.label}"估算` : '估算';
+  // —— 底部说明：按【当前真正生效的画像】更新文案，并标出来源（手选/机器人接管）——
+  //    用 effectiveStyle 而非手选值，保证这句说明和上面的胜率数字口径一致。
+  const effLabel = styleLabel(state.effectiveStyle);
+  const sourceTag = state.pictureSource === 'auto' ? '机器人接管' : '你手选';
+  dom.noteStyle.textContent = `按"对手${effLabel}"估算（${sourceTag}）`;
 
   // —— 当前牌型 ——
   const made = evaluate([...ctx.hole, ...ctx.board]);

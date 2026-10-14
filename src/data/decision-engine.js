@@ -26,7 +26,7 @@ import {
   getOpponentPercent,
 } from '../common/constants.js';
 import { simulateEquity } from './equity-engine.js';
-import { buildOpponentModel } from './opponent-model.js';
+import { buildOpponentModel, resolveOpponentStyle } from './opponent-model.js';
 
 // 各策略实现：按"策略名 -> 决策函数"登记。
 //   新增策略时在这里加一行即可（档位③的实现文件后续补上）。
@@ -83,18 +83,19 @@ export function decide(ctx, config = {}) {
   //   - 若传入了 records（边打边记），且你用的就是默认档（等于"没主见"），
   //     并且观察样本够多够可靠，就用机器人自己观察出的隐含风格覆盖基线。
   //   - 你一旦手动选了非默认风格，就【尊重你的选择】，不自作主张（数据一致性 + 可预期）。
+  //   ⚠️ "到底用哪个画像"这条规则统一交给 resolveOpponentStyle（和面板共用同一函数），
+  //      避免两处各写一份、导致"面板胜率"和"托管实际画像"对不上。
   const chosenStyle = config.opponentStyle || DEFAULT_OPPONENT_STYLE;
-  let opponentStyle = chosenStyle;
   let opponentModel = null;
   let modelNote = '';
 
   if (Array.isArray(config.records)) {
     opponentModel = buildOpponentModel(config.records);
-    const userUsedDefault = !config.opponentStyle || config.opponentStyle === DEFAULT_OPPONENT_STYLE;
-    if (userUsedDefault && opponentModel.reliable && opponentModel.impliedStyle) {
-      opponentStyle = opponentModel.impliedStyle; // 用观察结果覆盖默认档
-      modelNote = `（已据 ${opponentModel.handsSeen} 手观察，自动按「${opponentStyle}」桌打）`;
-    }
+  }
+  const resolved = resolveOpponentStyle(chosenStyle, opponentModel);
+  const opponentStyle = resolved.style;
+  if (resolved.overridden) {
+    modelNote = `（已据 ${opponentModel.handsSeen} 手观察，自动按「${opponentStyle}」桌打）`;
   }
 
   // 3) 先算胜率（决策的核心依据）。对手牌力按上面定好的风格来。

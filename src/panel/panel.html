@@ -77,14 +77,22 @@
       </div>
     </section>
 
-    <!-- 对手档案（边打边记）：机器人自己观察出的桌面风格。
-         ⚠️ 只有能从数据流稳定拿到"手牌编号+本人身份"时才给结论，
-         拿不到就老实显示"数据不足"，绝不编造（和决策层同一条红线）。 -->
-    <section class="oppmodel">
-      <div class="oppmodel__head">
-        <span class="oppmodel__title">对手档案</span>
-        <span class="oppmodel__hint">（边打边记）</span>
+    <!-- 对手画像状态卡：把"你手选的"和"机器人边打边记学到的"合并成一张卡，
+         一眼看清：此刻到底按哪个画像算、它从哪来、以及怎么改回来。
+         ⚠️ 机器人只有拿到可靠数据(手牌编号+本人身份+足够样本)才接管，
+            否则老实退回你手选的，绝不编造（和决策层同一条红线）。 -->
+    <section class="picture">
+      <div class="picture__head">
+        <span class="picture__title">对手画像</span>
+        <span class="picture__source" id="pictureSource">你手选</span>
       </div>
+      <div class="picture__main">
+        <span class="picture__label">当前生效</span>
+        <span class="picture__style" id="pictureStyle">标准（常规）</span>
+        <button type="button" class="picture__reset" id="pictureReset" hidden>改回自动</button>
+      </div>
+      <p class="picture__hint" id="pictureHint"></p>
+      <!-- 边打边记的原始观察明细（观察手数 / 入池率 / 为什么还不可靠） -->
       <div id="oppmodelBody" class="oppmodel__body">观察中…</div>
     </section>
 
