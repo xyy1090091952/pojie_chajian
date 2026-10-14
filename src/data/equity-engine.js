@@ -21,6 +21,9 @@ import { buildDeck, evaluate, compareHands, detectDraws, parseCard } from './pok
 import { EQUITY } from '../common/constants.js';
 import { getAllowedClassSet, comboClassKey, RANGE_MAX_TRIES } from './hand-range.js';
 
+// 按权重抽对手牌时（大注下空气牌权重很低，收牌率低），多给几倍的尝试次数，保证几乎都能抽到合规的牌。
+const WEIGHTED_TRIES_MULT = 3;
+
 /**
  * 从一副完整牌里，去掉"已知的牌"，返回剩余可用的牌。
  * @param {Array<{r,s}>} knownCards 已知牌（你的底牌 + 已翻公共牌）
@@ -47,39 +50,50 @@ function shuffleInPlace(arr) {
 /**
  * 从"剩余牌池"里给一个对手发两张牌（会把发出去的牌从池里移除，避免重复用）。
  * 这是"对手牌组范围"的落地点：
- *   - allowedSet 为 null（风格=随机）时：直接从已洗好的牌池顶部拿两张，最快，等同老逻辑。
- *   - allowedSet 有值时：只接受"组合牌型落在允许范围里"的两张牌（如只发前 25% 的强牌），
- *     随机试，最多 RANGE_MAX_TRIES 次；范围太窄实在凑不出就兜底随便发（避免死循环）。
+ *   - allowedSet 和 weigher 都没有（风格=随机、没人下注）时：直接从已洗好的牌池顶部拿两张，最快。
+ *   - allowedSet 有值时：只接受"组合牌型落在允许范围里"的两张牌（如只发前 25% 的强牌）。
+ *   - weigher 有值时（翻牌后面对下注）：再按"这手牌会这样下注的可能性"(0~1) 抽签决定收不收，
+ *     例如权重 0.1 的空气牌，10 次里只收 1 次 —— 这样发出来的对手牌就"像个会下注的人"。
+ *   随机试，最多 maxTries 次；实在凑不出时，用试过的牌里"权重最高"的那手兜底（宁可把对手想强，不想弱）。
  * @param {Array<{r,s}>} pool  剩余可发的牌（会被原地修改：移除已发的牌）
  * @param {Set<string>|null} allowedSet  允许的牌型集合，null = 不限制
+ * @param {Function|null} [weigher]  手牌权重函数 (a,b)=>0~1，null = 不加权
  * @returns {Array<{r,s}>} 两张牌
  */
-function dealOpponentHand(pool, allowedSet) {
-  // 随机风格：牌池本就洗过，直接取顶部两张即可
-  if (!allowedSet) {
+function dealOpponentHand(pool, allowedSet, weigher = null) {
+  // 不限制范围也不加权：牌池本就洗过，直接取顶部两张即可
+  if (!allowedSet && !weigher) {
     return [pool.pop(), pool.pop()];
   }
 
-  // 范围风格：随机挑两张，直到凑出"落在允许牌型里"的组合
-  for (let t = 0; t < RANGE_MAX_TRIES; t++) {
+  const maxTries = weigher ? RANGE_MAX_TRIES * WEIGHTED_TRIES_MULT : RANGE_MAX_TRIES;
+  let backup = null; // 兜底候选：{i, j, w}，记下试过的"合规且权重最高"的那手
+  for (let t = 0; t < maxTries; t++) {
     const i = Math.floor(Math.random() * pool.length);
     let j = Math.floor(Math.random() * pool.length);
     while (j === i) j = Math.floor(Math.random() * pool.length); // 两张不能是同一张
 
     const a = pool[i];
     const b = pool[j];
-    if (allowedSet.has(comboClassKey(a, b))) {
-      // 命中：把这两张从池里删掉（先删大下标，避免删完位置错乱）
-      const hi = Math.max(i, j);
-      const lo = Math.min(i, j);
-      pool.splice(hi, 1);
-      pool.splice(lo, 1);
-      return [a, b];
-    }
+    if (allowedSet && !allowedSet.has(comboClassKey(a, b))) continue; // 起手牌不在范围里，换一手
+    const w = weigher ? weigher(a, b) : 1;
+    if (!backup || w > backup.w) backup = { i, j, w };
+    // 按权重抽签：权重 1 一定收，权重 0.1 只有 10% 的机会收
+    if (w >= 1 || Math.random() < w) return takePair(pool, i, j);
   }
 
-  // 兜底：范围太窄 + 剩牌受限，凑不出合规牌，就随便发两张（极少发生，影响可忽略）
+  // 兜底：用试过的牌里权重最高的那手；一手合规的都没试到（极少发生），就随便发两张
+  if (backup) return takePair(pool, backup.i, backup.j);
   return [pool.pop(), pool.pop()];
+}
+
+/** 把牌池里下标 i、j 的两张牌取出来（先删大下标，避免删完位置错乱）。 */
+function takePair(pool, i, j) {
+  const a = pool[i];
+  const b = pool[j];
+  pool.splice(Math.max(i, j), 1);
+  pool.splice(Math.min(i, j), 1);
+  return [a, b];
 }
 
 /**
@@ -90,6 +104,8 @@ function dealOpponentHand(pool, allowedSet) {
  *   @param {number}               input.opponents  还没弃牌的对手数
  *   @param {number}               [input.opponentPercent] 对手牌组范围：只玩"最强前百分之几"的牌。
  *                                   100（或不传）= 随机任意牌（最乐观）；越小 = 对手越强、你胜率越低越真实。
+ *   @param {{bettor:Function, others:Function}} [input.weighers] 可选：翻牌后面对下注时的"手牌权重函数"
+ *                                   （见 opponent-range.js）。第 1 个对手当作下注者用 bettor，其余对手用 others。
  *   @param {number}               [input.simulations] 模拟次数（默认取常量）
  * @returns {{win:number, tie:number, lose:number, equity:number, samples:number, ok:boolean, reason?:string}}
  *   win/tie/lose 是百分比；equity 是"综合赢面"（平局按人数均分彩池）。
@@ -99,6 +115,11 @@ export function simulateEquity(input) {
 
   // 对手牌组范围：把"百分比"换成"允许的牌型集合"。null 表示随机（不过滤）。
   const allowedSet = getAllowedClassSet(input.opponentPercent);
+  // 翻牌后面对下注时的"手牌权重函数"（没有就不加权，等同老逻辑）。
+  const weighers =
+    input.weighers && typeof input.weighers.bettor === 'function' && typeof input.weighers.others === 'function'
+      ? input.weighers
+      : null;
 
   // 1) 把输入统一成 {r,s}，并做基本校验
   const hole = (input.hole || []).map((c) => (typeof c === 'string' ? parseCard(c) : c)).filter(Boolean);
@@ -135,10 +156,11 @@ export function simulateEquity(input) {
     //   所以用一个会被修改的副本 pool，公共牌则从剩下的里补。
     const pool = shuffleInPlace(remaining.slice());
 
-    // 先给每个对手发 2 张（按牌组范围过滤，发出去的牌会从 pool 里移除）
+    // 先给每个对手发 2 张（按牌组范围过滤 + 按下注可能性加权，发出去的牌会从 pool 里移除）
     const oppScores = [];
     for (let o = 0; o < opponents; o++) {
-      const oppHole = dealOpponentHand(pool, allowedSet);
+      const weigher = weighers ? (o === 0 ? weighers.bettor : weighers.others) : null;
+      const oppHole = dealOpponentHand(pool, allowedSet, weigher);
       oppScores.push([...oppHole]); // 先存底牌，等公共牌补齐后再打分
     }
 

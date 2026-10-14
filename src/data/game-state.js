@@ -280,7 +280,9 @@ export function extractGameState(records) {
   const pot = Number(pick(view, POT_KEYS)) || 0;
 
   // —— 待跟注：全场最高下注 - 我已下注（取不到就当 0）——
-  const toCall = computeToCall(players, viewerId);
+  //   heroBet / maxBet 一并导出：River 的金额框是"加注至"(raise-to)，
+  //   策略必须知道"我本轮已投多少、最高注是多少"，才能把下注额换算成正确的加注至金额。
+  const { toCall, heroBet, maxBet } = computeBets(players, viewerId);
 
   // —— 我的位置（早/中/晚位）：防御式抽取，拿不到为 null，策略会据此退回原逻辑 ——
   const position = extractHeroPosition(heroPlayer);
@@ -296,7 +298,7 @@ export function extractGameState(records) {
 
   // 局面指纹：关键数据任一变化才需重算。
   const signature = [
-    hole.join(','), board.join(','), opponents, pot, toCall,
+    hole.join(','), board.join(','), opponents, pot, toCall, heroBet, maxBet,
     position || '-', stack ?? '-', bigBlind ?? '-',
     minRaiseTo ?? '-', maxRaiseTo ?? '-',
   ].join('|');
@@ -308,6 +310,8 @@ export function extractGameState(records) {
     opponents,
     pot,
     toCall,
+    heroBet, // 我本轮已下注额（翻牌前在盲注位时 > 0）
+    maxBet, // 本轮全场最高下注额（= 别人"加注至"的金额）
     position,
     stack,
     bigBlind,
@@ -318,13 +322,16 @@ export function extractGameState(records) {
 }
 
 /**
- * 推算"我还需要跟多少注"：
- *   = 全场所有人里的最高下注额 - 我当前已下注额。
- *   取不到下注字段时返回 0（界面会显示"无需跟注/数据不足"）。
+ * 推算本轮下注情况：
+ *   - maxBet  全场所有人里的最高下注额
+ *   - heroBet 我当前已下注额
+ *   - toCall  我还需要跟多少 = maxBet - heroBet
+ *   取不到下注字段时三者都为 0（界面会显示"无需跟注/数据不足"）。
+ * @returns {{toCall:number, heroBet:number, maxBet:number}}
  */
-function computeToCall(players, viewerId) {
+function computeBets(players, viewerId) {
   let maxBet = 0;
-  let myBet = 0;
+  let heroBet = 0;
   let foundBetField = false;
 
   for (const p of players) {
@@ -332,11 +339,11 @@ function computeToCall(players, viewerId) {
     if (!Number.isNaN(bet) && pick(p, BET_KEYS) !== undefined) {
       foundBetField = true;
       if (bet > maxBet) maxBet = bet;
-      if (isHero(p, viewerId)) myBet = bet;
+      if (isHero(p, viewerId)) heroBet = bet;
     }
   }
-  if (!foundBetField) return 0; // 没有下注字段，无法推算
-  return Math.max(0, maxBet - myBet);
+  if (!foundBetField) return { toCall: 0, heroBet: 0, maxBet: 0 }; // 没有下注字段，无法推算
+  return { toCall: Math.max(0, maxBet - heroBet), heroBet, maxBet };
 }
 
 // 导出常量集合，方便以后在别处（如调试）引用同一套字段名

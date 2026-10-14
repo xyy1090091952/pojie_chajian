@@ -8,18 +8,24 @@
  * 和「群体默认画像」(constants 的 OPPONENT_STYLES) 的关系：
  *   - 群体画像 = 你【手动】选的"这桌大概什么性质"（松/标准/紧），是先验兜底。
  *   - 对手档案 = 机器人【自己观察】出来的真实倾向，是后验学习（边打边学）。
- *   决策引擎的用法：你如果用的是默认「标准」(等于没主见)，且观察样本够多够可靠，
- *   就用观察结果覆盖；你一旦手动选了非默认风格，就尊重你的判断，不自作主张。
+ *   决策引擎的用法：面板"对手类型"选「自动识别」（默认）时，观察样本够多够可靠就用观察结果，
+ *   不够就先按"标准"算；你一旦手动选了某种风格，就尊重你的判断，不自作主张。
  *
  * ⚠️ 诚实红线（最重要）：拿不到可靠数据就【返回空档案】，绝不编造。
  *   必须同时满足两个前提才认为"可统计"：
  *     1) 数据流里能稳定拿到"手牌编号"（handId）—— 否则没法区分这是第几手，统计会串味。
  *     2) 数据流里能稳定拿到"我是谁"(viewerId) —— 否则分不清敌我，会把自己也统计进去。
- *   任一前提缺失 => reliable:false + 空 seats，决策引擎据此退回你手选的画像。
+ *   任一前提缺失 => reliable:false + 空 seats，决策引擎据此先按"标准"算。
  */
 
 import { parseCards } from './card-parser.js';
-import { DIRECTION, DEFAULT_OPPONENT_STYLE } from '../common/constants.js';
+import {
+  DIRECTION,
+  OPPONENT_STYLES,
+  OPPONENT_STYLE_AUTO,
+  AUTO_FALLBACK_STYLE,
+  getOpponentStyleLabel,
+} from '../common/constants.js';
 import { STATE_FIELD_KEYS } from './game-state.js';
 
 // ============ 本模块专用阈值与字段候选（集中成常量，便于调参，和逻辑解耦） ============
@@ -152,8 +158,8 @@ export function buildOpponentModel(records) {
 
   // —— 前提校验：少任何一个必要条件，就返回空档案（诚实降级）——
   if (!sawAnyView) return empty('尚未识别到牌桌状态');
-  if (!sawHandId) return empty('数据流未提供手牌编号，无法跨手统计对手（已退回手选画像）');
-  if (!sawViewerId) return empty('数据流未提供本人身份，无法区分敌我（已退回手选画像）');
+  if (!sawHandId) return empty('数据流里没有手牌编号，没法跨手统计对手');
+  if (!sawViewerId) return empty('数据流里没有本人身份，没法区分敌我');
 
   // —— 第二步：把"每手每座位"的聚合，累加成"每座位"的长期统计（排除 hero 自己）——
   //   seatStats = Map<seatId, {hands, vpipHands, foldHands, showdowns}>
@@ -180,7 +186,7 @@ export function buildOpponentModel(records) {
     return {
       ok: true,
       reliable: false,
-      reason: `样本偏少（已观察 ${handsSeen} 手，需 ≥ ${MIN_HANDS_FOR_RELIABLE} 手），暂退回手选画像`,
+      reason: `样本偏少（已观察 ${handsSeen} 手，需 ≥ ${MIN_HANDS_FOR_RELIABLE} 手）`,
       handsSeen,
       tableVpip: null,
       impliedStyle: null,
@@ -207,7 +213,7 @@ export function buildOpponentModel(records) {
   return {
     ok: true,
     reliable: true,
-    reason: `已观察 ${handsSeen} 手，平均入池率约 ${Math.round((tableVpip || 0) * 100)}%，判定为「${impliedStyle}」桌`,
+    reason: `已观察 ${handsSeen} 手，对手平均入池率约 ${Math.round((tableVpip || 0) * 100)}%，判断这桌偏「${getOpponentStyleLabel(impliedStyle)}」`,
     handsSeen,
     tableVpip,
     impliedStyle,
@@ -234,34 +240,37 @@ function toSeatsObject(seatStats) {
  * 【共享决策】最终该用哪个"对手画像"？—— 面板和托管共用同一条规则（单一数据源）。
  * ------------------------------------------------------------
  * 为什么要抽出来（讲人话）：
- *   以前"用手选的还是用自动观察的"这段判断，面板和决策引擎各写了一份，
- *   很容易改歪、导致"面板显示的胜率"和"机器人实际按的画像"对不上。
- *   现在把它收成一个纯函数，两边都调它，结论永远一致。
+ *   "用手选的还是用自动观察的"这段判断如果面板和决策引擎各写一份，很容易改歪，
+ *   导致"面板显示的胜率"和"机器人实际按的画像"对不上。收成一个纯函数，两边都调它，结论永远一致。
  *
- * 规则（和产品约定一致）：
- *   1) 你一旦手动选了【非默认】风格（松/紧/随机）=> 永远尊重你的选择，机器人不插手；
- *   2) 你用的是默认「标准」(等于"没主见")，且边打边记的样本够多够可靠 => 用观察结果覆盖；
- *   3) 其余情况（样本不足/数据拿不到）=> 退回你手选的（此时就是默认「标准」）。
+ * 规则：
+ *   1) 你选了「自动识别」（默认）：观察样本够多够可靠 => 用观察结果；不够 => 先按"标准"算。
+ *   2) 你手动选了某种风格（随机/松/标准/紧）=> 永远按你选的算，机器人不插手。
+ *   3) 存了一个不认识的值（比如老版本留下的）=> 当成「自动识别」处理，保证不崩。
  *
- * @param {string} chosenStyle 用户手选的风格 id（面板下拉的值）
+ * @param {string} chosenStyle 面板"对手类型"下拉的值（auto 或具体风格 id）
  * @param {object|null} model   buildOpponentModel 的结果（可为 null）
  * @returns {{
- *   style:string,        // 最终生效的风格 id（喂给胜率/策略）
- *   source:'auto'|'manual', // 这个风格的来源：auto=机器人观察接管，manual=你手选
- *   overridden:boolean,  // 是否发生了"自动覆盖默认档"
- *   model:(object|null), // 原样带出档案，方便上层展示
+ *   style:string,           // 最终生效的风格 id（喂给胜率/策略，一定是 OPPONENT_STYLES 里的真实风格）
+ *   source:'auto'|'manual', // auto=你选了自动识别，manual=你手动指定
+ *   learned:boolean,        // 自动识别时，是否已经用上了观察结果（false=样本不够，暂按标准）
+ *   overridden:boolean,     // 同 learned（保留旧字段名，兼容老调用方）
+ *   model:(object|null),    // 原样带出档案，方便上层展示
  * }}
  */
 export function resolveOpponentStyle(chosenStyle, model) {
-  const style = chosenStyle || DEFAULT_OPPONENT_STYLE;
-  // "没主见" = 没选 或 选的就是默认档，这时才允许自动画像接管。
-  const userUsedDefault = !chosenStyle || chosenStyle === DEFAULT_OPPONENT_STYLE;
-  const canAuto = Boolean(userUsedDefault && model && model.reliable && model.impliedStyle);
-
-  if (canAuto) {
-    return { style: model.impliedStyle, source: 'auto', overridden: true, model };
+  const isManual = OPPONENT_STYLES.some((s) => s.id === chosenStyle) && chosenStyle !== OPPONENT_STYLE_AUTO;
+  if (isManual) {
+    return { style: chosenStyle, source: 'manual', learned: false, overridden: false, model: model || null };
   }
-  return { style, source: 'manual', overridden: false, model: model || null };
+  const learned = Boolean(model && model.reliable && model.impliedStyle);
+  return {
+    style: learned ? model.impliedStyle : AUTO_FALLBACK_STYLE,
+    source: 'auto',
+    learned,
+    overridden: learned,
+    model: model || null,
+  };
 }
 
 // 导出常量集合，方便调试/单测时引用同一套阈值与字段名。

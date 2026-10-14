@@ -1,7 +1,7 @@
 {
-  "name": "dh-audit-extension",
-  "version": "1.0.0",
+  "name": "texas-autopilot-extension",
+  "version": "1.1.0",
   "private": true,
-  "description": "德州数据审计器（Chrome MV3 插件）。本文件仅用于声明源码为 ES Module，便于 Node 下做单元自测；Chrome 加载插件时会忽略它。",
+  "description": "德州托管助手（Chrome MV3 插件）。本文件仅用于声明源码为 ES Module，便于 Node 下做单元自测；Chrome 加载插件时会忽略它。",
   "type": "module"
 }

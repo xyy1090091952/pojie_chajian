@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "德州胜率助手",
-  "version": "1.0.0",
-  "description": "只用你本人可见的数据（你的底牌 + 已翻公共牌 + 存活对手数）实时估算胜率，等价于 PokerStove / Equilab 这类公开胜率计算器。",
+  "name": "德州托管助手",
+  "version": "1.1.0",
+  "description": "River 德州自动托管：根据你的底牌、公共牌、底池和对手行为实时算胜率并给出建议，开启托管后自动弃牌/过牌/跟注/加注，出手前先预告、随时可叫停。",
 
   "permissions": ["storage", "sidePanel"],
 
@@ -37,7 +37,7 @@
   ],
 
   "action": {
-    "default_title": "打开德州胜率助手"
+    "default_title": "打开德州托管助手"
   },
 
   "side_panel": {

@@ -21,7 +21,7 @@
  * 约定的返回结构（所有策略都遵守同一份"合同"，便于互换）：
  *   { action, amount, reason }
  *     action —— POKER_ACTION 之一（fold/check/call/raise）
- *     amount —— 仅 raise 时有意义：建议加注到多少筹码；其它动作为 0
+ *     amount —— 恒为 0；加注金额由 sizing（意图）交给 bet-sizing.js 统一换算
  *     reason —— 给人看的决策理由（会显示在面板"最近动作"里）
  */
 
@@ -35,23 +35,16 @@ const RAISE_EXTRA_MARGIN = 15; // 高出回本线 (CALL_MARGIN + 15) 个点以�
 // 没有底池赔率数据时（比如还没下注、免费看牌），用这个绝对胜率线来决定是否价值加注。
 const FREE_VALUE_RAISE_EQUITY = 65; // 免费可过牌时，胜率 >= 65% 才主动加注要价
 
-/**
- * 计算一个"稳健的加注额"：当前底池的固定比例，并向下取整到整数筹码。
- * @param {number} pot 当前底池
- * @returns {number} 建议加注到的筹码数（至少为 1，避免 0 注）
- */
-function computeRaiseAmount(pot) {
-  const base = Number(pot) || 0;
-  const raise = Math.floor(base * AUTOPILOT.RAISE_POT_RATIO);
-  return Math.max(1, raise);
-}
+// 加注意图：统一交给 bet-sizing.js 换算成"加注至"金额（会自动处理跟注额、封顶、合法范围）。
+//   简单档只用一种尺度：跟平后再加半个底池。
+const RAISE_SIZING = { kind: 'pot', ratio: AUTOPILOT.RAISE_POT_RATIO, strength: 'normal' };
 
 /**
  * 【对外主函数】简单档决策。
  * @param {object} params
  *   @param {object} params.ctx 局面上下文（game-state.js 产出）：{hole,board,opponents,pot,toCall}
  *   @param {object} params.eq  胜率结果（equity-engine.js 产出）：{equity,win,...,ok}
- * @returns {{action:string, amount:number, reason:string}}
+ * @returns {{action:string, amount:number, reason:string, sizing?:object}}
  */
 export function decide({ ctx, eq }) {
   // 兜底：胜率没算出来就别乱动，交给上层决定（通常是"不托管这手"）。
@@ -70,11 +63,11 @@ export function decide({ ctx, eq }) {
   // —— 情况 A：不用花钱（可免费过牌）——
   if (toCall <= 0) {
     if (equity >= FREE_VALUE_RAISE_EQUITY) {
-      const amount = computeRaiseAmount(pot);
       return {
         action: POKER_ACTION.RAISE,
-        amount,
-        reason: `可免费行动且胜率高达 ${equity}%，主动加注到约 ${amount} 要价。`,
+        amount: 0,
+        sizing: RAISE_SIZING,
+        reason: `可免费行动且胜率高达 ${equity}%，主动下注要价`,
       };
     }
     return {
@@ -101,11 +94,11 @@ export function decide({ ctx, eq }) {
 
   // 明显高出回本线一大截 -> 加注（价值最大化）
   if (margin >= EQUITY.CALL_MARGIN + RAISE_EXTRA_MARGIN) {
-    const amount = computeRaiseAmount(pot);
     return {
       action: POKER_ACTION.RAISE,
-      amount,
-      reason: `胜率 ${equity}% 远高于回本线 ${breakeven}%，加注到约 ${amount} 扩大收益。`,
+      amount: 0,
+      sizing: RAISE_SIZING,
+      reason: `胜率 ${equity}% 远高于回本线 ${breakeven}%，加注扩大收益`,
     };
   }
 

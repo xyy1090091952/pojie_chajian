@@ -151,30 +151,59 @@ function humanClick(el) {
 }
 
 /**
+ * 【安全修正】按页面上真实存在的按钮，把决策动作修正成"更不亏"的等价动作：
+ *   - 想弃牌，但页面有可点的"过牌"=> 改为过牌（能免费看牌就绝不弃牌，弃牌是白送）；
+ *   - 想跟注，但没有跟注按钮、只有过牌 => 改为过牌（说明其实不用花钱）。
+ * 为什么要在执行层再做一次：后台的 toCall 来自抓包数据，偶尔会和页面慢半拍，
+ *   以页面上"真能点的按钮"为准最可靠。
+ * @param {string} action 决策动作
+ * @returns {{action:string, btn:Element|null, note:string}}
+ */
+function resolveAction(action) {
+  const find = (a) => findActionButton(ACTION_BUTTON_RULES[a]);
+  const checkBtn = find(POKER_ACTION.CHECK);
+
+  if (action === POKER_ACTION.FOLD && checkBtn) {
+    return { action: POKER_ACTION.CHECK, btn: checkBtn, note: '（可以免费过牌，已把弃牌改为过牌）' };
+  }
+  const btn = find(action);
+  if (!btn && action === POKER_ACTION.CALL && checkBtn) {
+    return { action: POKER_ACTION.CHECK, btn: checkBtn, note: '（无需跟注，已改为过牌）' };
+  }
+  return { action, btn, note: '' };
+}
+
+/**
  * 【对外主函数】执行一个决策动作。
  * @param {object} decision {action, amount, reason, ...}（background 决策引擎产出）
- * @returns {Promise<{ok:boolean, action?:string, amount?:number, label?:string, reason:string}>}
+ * @param {object} [options]
+ *   @param {() => boolean} [options.isCancelled] 拟人等待结束后再问一次"还要不要点"；
+ *     返回 true（比如你在预告期间关掉了托管）就放弃这一步，把操作权完全交还给你。
+ * @returns {Promise<{ok:boolean, action?:string, amount?:number, label?:string, reason:string, cancelled?:boolean}>}
  *   ok=true 表示成功点了；ok=false 带 reason 说明为何没点（如没找到按钮）。
  */
-export async function executeDecision(decision) {
+export async function executeDecision(decision, options = {}) {
   if (!decision || !decision.action) {
     return { ok: false, reason: '没有有效决策，跳过。' };
   }
-
-  const action = decision.action;
-  const rule = ACTION_BUTTON_RULES[action];
-  if (!rule) {
-    return { ok: false, reason: `未知动作「${action}」，跳过。` };
+  if (!ACTION_BUTTON_RULES[decision.action]) {
+    return { ok: false, reason: `未知动作「${decision.action}」，跳过。` };
   }
 
-  // 1) 先找到动作按钮；找不到就不动（宁可不点也不乱点）。
-  const btn = findActionButton(rule);
+  // 1) 按页面真实按钮修正动作（能过牌绝不弃牌），并找到按钮；找不到就不动（宁可不点也不乱点）。
+  const { action, btn, note } = resolveAction(decision.action);
   if (!btn) {
     return { ok: false, reason: `页面上没找到「${POKER_ACTION_NAMES[action] || action}」按钮，跳过。` };
   }
+  const reason = `${decision.reason || ''}${note}`;
 
-  // 2) 拟人化等待：像真人思考一会儿再出手。
+  // 2) 拟人化等待：像真人思考一会儿再出手（面板此时显示"接下来"预告）。
   await sleep(randomDelay());
+
+  // 2.1 等待期间你关掉了托管 => 这一步不点了
+  if (typeof options.isCancelled === 'function' && options.isCancelled()) {
+    return { ok: false, cancelled: true, reason: '托管已关闭，已取消这一步，由你自己操作。' };
+  }
 
   // 3) 等待后按钮可能已失效（局面变了），再确认一次可点。
   if (!isActionable(btn)) {
@@ -196,9 +225,10 @@ export async function executeDecision(decision) {
   return {
     ok: true,
     action,
-    amount: Number(decision.amount) || 0,
+    // 过牌/弃牌不花钱；跟注金额以决策里的 toCall 为准（面板统计用）
+    amount: action === POKER_ACTION.CALL ? Number(decision.toCall) || 0 : 0,
     label: POKER_ACTION_NAMES[action] || action,
-    reason: decision.reason || '',
+    reason,
   };
 }
 
@@ -286,10 +316,11 @@ function fallbackToSafeAction(why) {
  *   只要页面上出现了可点的"开始"按钮，就替房主点一下进下一局。
  *
  * 为什么同样加拟人化延迟：避免一出现按钮就瞬间点击，像机器人。
+ * @param {object} [options] 同 executeDecision：isCancelled() 返回 true 就不点
  * @returns {Promise<{ok:boolean, reason:string}>}
  *   ok=true 表示点了；ok=false 表示没找到按钮（通常意味着不是房主、或还不能开始）。
  */
-export async function clickNextHand() {
+export async function clickNextHand(options = {}) {
   // 1) 先找"开始下一手"按钮；找不到就什么都不做（非房主/未到可开始状态都属正常）。
   const btn = findActionButton(NEXT_HAND_BUTTON_RULES);
   if (!btn) {
@@ -298,6 +329,9 @@ export async function clickNextHand() {
 
   // 2) 拟人化等待后再点。
   await sleep(randomDelay());
+  if (typeof options.isCancelled === 'function' && options.isCancelled()) {
+    return { ok: false, cancelled: true, reason: '托管已关闭，不再自动开局。' };
+  }
 
   // 3) 等待后再确认一次仍可点（局间状态可能变化）。
   if (!isActionable(btn)) {

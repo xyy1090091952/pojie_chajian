@@ -1,20 +1,18 @@
 /**
  * 数据层：「决策引擎」统一入口（托管大脑的总开关 + 路由）
  * ------------------------------------------------------------
- * 职责（单一）：根据配置的"策略档位"，把当前局面交给对应的策略去决策，
- *   最后统一产出一个标准化的决策结果。它只负责"选哪套大脑 + 把输入喂进去"，
- *   具体怎么想交给各个 strategies/*-strategy.js（可插拔、互不干扰）。
+ * 职责：根据配置的"策略档位"，把当前局面交给对应的策略去决策，最后统一产出标准化结果。
  *
- * 为什么要有这一层（模块化 + 数据管理层抽象）：
- *   - 调用方（执行器/面板）永远只调 decide(ctx, config)，不关心用的是哪套策略；
- *   - 以后新增"复杂判断""GTO 策略"，只要在 STRATEGY_TIERS 里登记 + 写个策略文件，
- *     这里加一行路由即可，调用方代码一个字都不用改。
+ * 一次决策的流水线（讲人话）：
+ *   1) 定对手风格：你手选的，或机器人边打边记观察出来的；
+ *   2) 收窄对手范围：对手下注/加注越大，他手里越可能是好牌（opponent-range.js）；
+ *   3) 算胜率：按收窄后的范围做蒙特卡洛模拟；
+ *   4) 交给策略：策略只说"做什么 + 下注意图（半池 / 开池 2.5BB / 全下）"；
+ *   5) 换算金额：bet-sizing.js 把意图换算成正确的"加注至"金额，并封顶、夹合法范围；
+ *      换算不出合法加注（如普通牌只能全下）时，自动降级为跟注/过牌，绝不冒险。
  *
- * 输入 / 输出的"合同"（所有策略共享同一份，便于互换）：
- *   输入 ctx    —— game-state.js 产出的局面：{hole,board,opponents,pot,toCall,...}
- *   输入 config —— {tier: 档位id, opponentPercent: 对手牌力百分比}
- *   输出        —— {ok, action, amount, reason, tier, equity}
- *                  ok=false 时附 reason，表示"这手不方便托管"（如数据不足）。
+ * 输出：{ok, action, amount, reason, tier, equity, ...}
+ *   amount 只对加注有意义 = "加注至"金额（直接填进 River 的金额框）。
  */
 
 import {
@@ -23,132 +21,161 @@ import {
   DEFAULT_OPPONENT_STYLE,
   DEFAULT_AGGRESSION_PROFILE,
   DEFAULT_VALUE_BET_PROFILE,
+  DEFAULT_PREFLOP_ENTRY_PROFILE,
   getOpponentPercent,
+  getOpponentStyleLabel,
+  getValueBetProfile,
 } from '../common/constants.js';
-import { simulateEquity } from './equity-engine.js';
+import { simulateEquity, potOdds } from './equity-engine.js';
 import { buildOpponentModel, resolveOpponentStyle } from './opponent-model.js';
+import { narrowOpponentPercent } from './opponent-range.js';
+import { resolveRaiseTo } from './bet-sizing.js';
 
-// 各策略实现：按"策略名 -> 决策函数"登记。
-//   新增策略时在这里加一行即可（档位③的实现文件后续补上）。
+// 各策略实现：按"策略名 -> 决策函数"登记（新增策略在这里加一行即可）。
 import { decide as simpleDecide } from './strategies/simple-strategy.js';
 import { decide as complexDecide } from './strategies/complex-strategy.js';
 
-// 策略注册表：key 对应 STRATEGY_TIERS[].strategy 字段。
-//   暂未实现的档位先不登记，运行时会回退到 simple 并在 reason 里说明。
 const STRATEGY_REGISTRY = {
   simple: simpleDecide,
-  complex: complexDecide, // 档位②·复杂判断
+  complex: complexDecide, // 档位②·复杂判断（推荐）
   // gto: gtoDecide,          // 档位③，待实现
 };
 
 /**
- * 把策略算出的“加注至金额”限制在服务器明确给出的合法范围内。
- * 拿不到某一侧边界时只限制另一侧；两侧都没有则保持原值。
+ * 加注落实不了时的降级：能免费就过牌；要花钱时，胜率够回本线就跟，否则弃。
+ * @returns {{action:string, note:string}}
  */
-function normalizeRaiseAmount(amount, minRaiseTo, maxRaiseTo) {
-  let value = Number(amount);
-  if (!Number.isFinite(value) || value <= 0) return 0;
+function downgradeRaise(ctx, eq, why) {
+  const toCall = Number(ctx.toCall) || 0;
+  if (toCall <= 0) return { action: POKER_ACTION.CHECK, note: `（${why}，改为过牌）` };
+  const odds = potOdds(ctx.pot, toCall);
+  const breakeven = odds.ok && odds.breakevenPct != null ? odds.breakevenPct : 100;
+  const equity = eq && eq.ok ? eq.equity : 0;
+  // 翻牌前胜率天然偏低，策略本来就想加注说明牌不差，翻牌前统一降级为跟注。
+  const preflop = !ctx.board || ctx.board.length === 0;
+  if (preflop || equity >= breakeven) {
+    return { action: POKER_ACTION.CALL, note: `（${why}，改为跟注）` };
+  }
+  return { action: POKER_ACTION.FOLD, note: `（${why}，且跟注不划算，改为弃牌）` };
+}
 
-  const min = Number(minRaiseTo);
-  const max = Number(maxRaiseTo);
-  if (Number.isFinite(max) && max > 0) value = Math.min(value, max);
-  if (Number.isFinite(min) && min > 0) value = Math.max(value, min);
-  return Math.round(value);
+/**
+ * 把策略结果里的"加注"统一换算成合法的"加注至"金额。
+ *   兼容两种写法：新写法给 sizing 意图；老写法只给 amount（当作"加注至"金额直接用）。
+ */
+function finalizeRaise(ctx, eq, result, valueBetProfile) {
+  const sizing = result.sizing || { kind: 'raiseTo', value: result.amount };
+  const valueBet = getValueBetProfile(valueBetProfile).decision;
+  const resolved = resolveRaiseTo(ctx, sizing, valueBet);
+  if (!resolved.ok) {
+    const down = downgradeRaise(ctx, eq, resolved.reason.replace(/。$/, ''));
+    return { action: down.action, amount: 0, reason: `${result.reason}${down.note}`, allIn: false };
+  }
+  const verb = resolved.allIn ? '全下' : (Number(ctx.toCall) || 0) > 0 ? '加注至' : '下注至';
+  const extra = resolved.note ? `（${resolved.note}）` : '';
+  return {
+    action: POKER_ACTION.RAISE,
+    amount: resolved.raiseTo,
+    allIn: resolved.allIn,
+    reason: `${result.reason.replace(/[。，]$/, '')}，${verb} ${resolved.raiseTo}${extra}。`,
+  };
 }
 
 /**
  * 【对外主函数】对当前局面做一次托管决策。
  * @param {object} ctx 局面上下文（game-state.js 的 extractGameState 结果，需 ok=true）
  * @param {object} [config]
- *   @param {string} [config.tier]            策略档位 id（默认取档位配置里的默认档）
- *   @param {string} [config.opponentStyle]   对手风格 id（用于设定对手牌力，影响胜率）
- *   @param {string} [config.aggressionProfile] 整体打法倾向（稳健/均衡/激进）
- *   @param {string} [config.valueBetProfile] 大牌价值下注力度（标准/强势/最大化）
- *   @param {number} [config.simulations]     可选：覆盖模拟次数（测试时可调小加速）
- *   @param {Array}  [config.records]         可选：全部抓包记录。传入时会"边打边记"构建对手档案，
- *                                            在你没主动选风格（用默认档）且观察可靠时，用观察结果覆盖。
- * @returns {{ok:boolean, reason?:string, action?:string, amount?:number, tier?:string, equity?:object, opponentModel?:object}}
+ *   @param {string} [config.tier]              策略档位 id
+ *   @param {string} [config.opponentStyle]     对手类型 id（auto=自动识别，或具体风格）
+ *   @param {string} [config.aggressionProfile] 整体打法倾向
+ *   @param {string} [config.valueBetProfile]   大牌下注力度
+ *   @param {string} [config.preflopEntryProfile] 翻牌前入池意愿（便宜时愿不愿意用差牌看翻牌）
+ *   @param {number} [config.simulations]       可选：覆盖模拟次数（测试时调小加速）
+ *   @param {Array}  [config.records]           可选：全部抓包记录（边打边记对手档案）
+ *   @param {object} [config.opponentModel]     可选：已算好的对手档案（面板已经算过时直接传，省得再算一遍）
+ *   @param {Function} [config.rng]             可选：随机数函数（测试注入）
+ * @returns {object}
  */
 export function decide(ctx, config = {}) {
-  // 1) 局面必须有效（有底牌等）。无效直接返回"不托管"，由上层决定如何提示。
+  // 1) 局面必须有效。
   if (!ctx || !ctx.ok) {
     return { ok: false, reason: (ctx && ctx.reason) || '局面数据不足，暂不托管。' };
   }
-
-  // 2) 解析配置档位（查不到会回退到默认档，保证不崩）。
   const tierConf = getStrategyTier(config.tier);
 
-  // 2.5) 决定本手用哪个"对手风格"：
-  //   - 基线 = 你手选的风格（没选则默认「标准」）。
-  //   - 若传入了 records（边打边记），且你用的就是默认档（等于"没主见"），
-  //     并且观察样本够多够可靠，就用机器人自己观察出的隐含风格覆盖基线。
-  //   - 你一旦手动选了非默认风格，就【尊重你的选择】，不自作主张（数据一致性 + 可预期）。
-  //   ⚠️ "到底用哪个画像"这条规则统一交给 resolveOpponentStyle（和面板共用同一函数），
-  //      避免两处各写一份、导致"面板胜率"和"托管实际画像"对不上。
+  // 2) 定对手风格（规则统一交给 resolveOpponentStyle，和面板共用，保证两边一致）。
   const chosenStyle = config.opponentStyle || DEFAULT_OPPONENT_STYLE;
-  let opponentModel = null;
-  let modelNote = '';
-
-  if (Array.isArray(config.records)) {
-    opponentModel = buildOpponentModel(config.records);
-  }
+  let opponentModel = config.opponentModel || null;
+  if (!opponentModel && Array.isArray(config.records)) opponentModel = buildOpponentModel(config.records);
   const resolved = resolveOpponentStyle(chosenStyle, opponentModel);
   const opponentStyle = resolved.style;
-  if (resolved.overridden) {
-    modelNote = `（已据 ${opponentModel.handsSeen} 手观察，自动按「${opponentStyle}」桌打）`;
-  }
+  const modelNote = resolved.learned
+    ? `（已观察 ${opponentModel.handsSeen} 手，按「${getOpponentStyleLabel(opponentStyle)}」对手打）`
+    : '';
 
-  // 3) 先算胜率（决策的核心依据）。对手牌力按上面定好的风格来。
+  // 3) 按对手下注行为收窄范围，再算胜率。
+  const range = narrowOpponentPercent(ctx, getOpponentPercent(opponentStyle));
   const eq = simulateEquity({
     hole: ctx.hole,
     board: ctx.board,
     opponents: ctx.opponents,
-    opponentPercent: getOpponentPercent(opponentStyle),
-    simulations: config.simulations, // 不传则引擎用默认次数
+    opponentPercent: range.percent,
+    weighers: range.weighers, // 翻牌后面对下注：按"对手会这样下注的牌"加权抽牌
+    simulations: config.simulations,
   });
-  if (!eq.ok) {
+  // 翻牌前策略不依赖胜率，算不出来也能决策；翻牌后没胜率就不托管。
+  if (!eq.ok && ctx.board && ctx.board.length > 0) {
     return { ok: false, reason: eq.reason || '胜率算不出来，暂不托管。', tier: tierConf.id };
   }
 
-  // 4) 按档位选策略函数。未实现的档位回退到 simple，并在理由里说明。
+  // 4) 选策略（未实现的档位回退 simple）。
   let strategyFn = STRATEGY_REGISTRY[tierConf.strategy];
   let fallbackNote = '';
   if (!strategyFn) {
     strategyFn = STRATEGY_REGISTRY.simple;
     fallbackNote = `（档位「${tierConf.label}」尚在开发中，暂用简单档代理）`;
   }
-
-  // 5) 交给策略决策，拿到标准化动作结果。
-  //    把 opponentStyle 一并传入：档位②会据此做"群体默认画像"的温和偏移
-  //    （松桌多价值少诈唬、紧桌敢施压）。简单档不读这个字段，多传无害。
+  const aggressionProfile = config.aggressionProfile || DEFAULT_AGGRESSION_PROFILE;
+  const valueBetProfile = config.valueBetProfile || DEFAULT_VALUE_BET_PROFILE;
+  const preflopEntryProfile = config.preflopEntryProfile || DEFAULT_PREFLOP_ENTRY_PROFILE;
   const result = strategyFn({
     ctx,
     eq,
     opponentStyle,
-    aggressionProfile: config.aggressionProfile || DEFAULT_AGGRESSION_PROFILE,
-    valueBetProfile: config.valueBetProfile || DEFAULT_VALUE_BET_PROFILE,
+    aggressionProfile,
+    valueBetProfile,
+    preflopEntryProfile,
+    rng: config.rng,
   });
-  const rawAmount = Number(result.amount) || 0;
-  const amount =
-    result.action === POKER_ACTION.RAISE
-      ? normalizeRaiseAmount(rawAmount, ctx.minRaiseTo, ctx.maxRaiseTo)
-      : rawAmount;
-  const amountNote =
-    result.action === POKER_ACTION.RAISE && amount !== Math.round(rawAmount)
-      ? `（已按牌桌合法范围调整为 ${amount}）`
-      : '';
 
-  // 6) 组装统一返回：带上档位、胜率、对手档案，方便面板展示与日志。
+  // 5) 加注统一换算金额；其它动作金额为 0。
+  let final = { action: result.action || POKER_ACTION.CHECK, amount: 0, reason: result.reason || '', allIn: false };
+  if (final.action === POKER_ACTION.RAISE) {
+    final = finalizeRaise(ctx, eq, result, valueBetProfile);
+  }
+  // 跟注时如果要跟的钱 ≥ 剩余筹码，实际就是跟注全下，标出来方便你在面板一眼看到。
+  const stack = Number(ctx.stack);
+  if (final.action === POKER_ACTION.CALL && Number.isFinite(stack) && stack > 0 && ctx.toCall >= stack) {
+    final.allIn = true;
+  }
+
   return {
     ok: true,
     tier: tierConf.id,
-    action: result.action || POKER_ACTION.CHECK,
-    // 使用服务器认可的合法金额，让“接下来”预告与最终实际下注保持一致。
-    amount,
+    action: final.action,
+    amount: final.amount,
+    allIn: final.allIn,
     minRaiseTo: ctx.minRaiseTo ?? null,
     maxRaiseTo: ctx.maxRaiseTo ?? null,
-    reason: (result.reason || '') + amountNote + modelNote + fallbackNote,
-    equity: eq, // 把胜率一起带出来，面板可直接显示，不必再算一遍
-    opponentModel, // 对手档案（可能为 null/不可靠），面板可选择性展示
+    toCall: Number(ctx.toCall) || 0, // 要跟的钱（执行层记录跟注金额用）
+    pot: Number(ctx.pot) || 0, // 当前底池（面板展示用）
+    stack: ctx.stack ?? null, // 我的剩余筹码（后台统计盈亏用；拿不到为 null）
+    reason: final.reason + modelNote + fallbackNote,
+    rangeNote: range.note, // 对手范围收窄说明（面板可展示）
+    opponentPercent: range.percent,
+    signature: ctx.signature, // 局面指纹：执行层用它防止对同一局面重复出手
+    street: Array.isArray(ctx.board) ? ctx.board.length : 0,
+    equity: eq.ok ? eq : null,
+    opponentModel,
   };
 }

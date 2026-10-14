@@ -9,7 +9,11 @@
  *   以后改识别方式只动这一个文件，控制器（controller）完全不用变。
  */
 
-import { isVisible } from './dom-locator.js';
+import { POKER_ACTION, ACTION_BUTTON_RULES } from '../../common/constants.js';
+import { isVisible, findActionButton } from './dom-locator.js';
+
+// 能证明"轮到我"的按钮：弃牌 / 过牌 / 跟注（加注按钮可能常驻，不作为判据）。
+const TURN_PROOF_ACTIONS = [POKER_ACTION.FOLD, POKER_ACTION.CHECK, POKER_ACTION.CALL];
 
 /** 取元素可见文字 */
 function textOf(el) {
@@ -17,13 +21,40 @@ function textOf(el) {
 }
 
 /**
+ * 最可靠的判据：动作区容器里有没有【可点】的弃牌/过牌/跟注按钮。
+ *   没轮到你时，这些按钮要么不存在、要么是禁用的；所以"能点"就等于"轮到我"。
+ * @returns {boolean|null} true=轮到我；false=动作区在但没可点按钮；null=页面上没找到动作区（交给兜底判断）
+ */
+function checkActionZone(rule, root) {
+  let zoneFound = false;
+  for (const sel of rule.actionZoneSelectors || []) {
+    let zone = null;
+    try {
+      zone = root.querySelector(sel);
+    } catch {
+      continue; // 选择器写错不致崩
+    }
+    if (!zone) continue;
+    zoneFound = true;
+    // 只在动作区里找按钮，避免误认页面其它地方的同名按钮
+    const hasButton = TURN_PROOF_ACTIONS.some((a) => findActionButton(ACTION_BUTTON_RULES[a], zone));
+    if (hasButton) return true;
+  }
+  return zoneFound ? false : null;
+}
+
+/**
  * 判断当前是否"轮到我行动"。
- * @param {object} rule TURN_INDICATOR_RULES：{selectors:string[], textIncludes:string[]}
+ * @param {object} rule TURN_INDICATOR_RULES：{actionZoneSelectors, selectors, textIncludes}
  * @param {Document|Element} [root=document]
  * @returns {boolean}
  */
 export function isMyTurn(rule, root = document) {
   if (!rule) return false;
+
+  // 0) 动作区判据（最可靠）：找到了动作区就以它为准，不再看文字（防止"轮到 XX"之类文字误判）。
+  const zoneResult = checkActionZone(rule, root);
+  if (zoneResult !== null) return zoneResult;
 
   // 1) 先看精确选择器：轮到我时常会出现/高亮某个元素（如 .your-turn）。
   //    只要这个元素存在且可见，就认为轮到我了。

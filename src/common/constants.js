@@ -10,8 +10,8 @@
  *        所以它内部复制了下面 CHANNEL.PAGE_SOURCE 这个字符串，两边必须一致。）
  */
 
-// 插件对外显示的名字
-export const EXTENSION_NAME = '德州胜率助手';
+// 插件对外显示的名字（和 manifest.json 的 name、面板标题保持一致）
+export const EXTENSION_NAME = '德州托管助手';
 
 // ============ 通信通道相关常量 ============
 // 数据流向：页面(interceptor) --postMessage--> content --sendMessage--> background --port--> panel
@@ -28,6 +28,7 @@ export const RUNTIME_MESSAGE = {
   GET_DECISION: 'GET_DECISION', // 托管：轮到我了，向后台要一个"该做什么动作"的决策
   AUTOPILOT_PLAN: 'AUTOPILOT_PLAN', // 托管：决策已出、但还没动手（在拟人延迟里），先把"打算怎么做"预告给面板
   AUTOPILOT_ACTED: 'AUTOPILOT_ACTED', // 托管：已经执行了一个动作，上报给后台（再转给面板展示）
+  AUTOPILOT_STATUS: 'AUTOPILOT_STATUS', // 托管：运行状态变化（等待中/思考中/跳过原因），面板顶部状态卡用
 };
 
 // background <-> panel 的消息类型
@@ -36,9 +37,34 @@ export const PANEL_MESSAGE = {
   SNAPSHOT: 'SNAPSHOT', // 后台回传的全部数据
   NEW_RECORD: 'NEW_RECORD', // 后台广播：来了一条新数据
   CLEAR: 'CLEAR', // 清空
-  AUTOPILOT_PLAN: 'AUTOPILOT_PLAN', // 后台广播：托管"接下来打算做"的预告（面板显示在动手之前）
-  AUTOPILOT_ACTION: 'AUTOPILOT_ACTION', // 后台广播：托管刚刚执行了某个动作（面板显示"最近动作"）
+  AUTOPILOT_STATE: 'AUTOPILOT_STATE', // 后台广播：托管会话的完整状态（状态/预告/历史/统计），面板整块重绘
+  RESET_STATS: 'RESET_STATS', // 面板请求：清空本场统计与动作历史
 };
+
+// 托管运行状态（面板顶部状态卡显示用）
+export const AUTOPILOT_STATUS = {
+  OFF: 'off', // 托管关闭
+  WAITING: 'waiting', // 托管开着，等轮到我
+  THINKING: 'thinking', // 轮到我了，正在思考/拟人延迟中
+  ACTED: 'acted', // 刚执行完一个动作
+  SKIPPED: 'skipped', // 轮到我但没法托管（数据不足/找不到按钮），等下一轮
+};
+
+// 状态 -> 面板显示文字
+export const AUTOPILOT_STATUS_LABELS = {
+  [AUTOPILOT_STATUS.OFF]: '托管已关闭',
+  [AUTOPILOT_STATUS.WAITING]: '等待轮到你…',
+  [AUTOPILOT_STATUS.THINKING]: '轮到你了，思考中…',
+  [AUTOPILOT_STATUS.ACTED]: '已出手，等待下一步',
+  [AUTOPILOT_STATUS.SKIPPED]: '这一步没能托管',
+};
+
+// 面板"动作历史"最多保留几条（存在 chrome.storage.session，关浏览器即清空）
+export const AUTOPILOT_HISTORY_LIMIT = 30;
+
+// 托管会话在 chrome.storage.session 里的键名：
+//   MV3 后台闲置约 30 秒会被浏览器休眠、内存清空，存一份在 session 存储里，醒来后能接着显示。
+export const AUTOPILOT_SESSION_KEY = 'autopilot_session';
 
 // 数据方向（是客户端发出去的，还是服务器发下来的）
 // 测泄露时，我们最关心 INBOUND（服务器 -> 客户端）里有没有别人的牌。
@@ -166,8 +192,29 @@ export const OPPONENT_STYLES = [
   },
 ];
 
-// 默认对手风格：用"标准"，比纯随机更接近真实牌局。
-export const DEFAULT_OPPONENT_STYLE = 'normal';
+// 「自动识别」选项：不预设对手，由机器人边打边记（见 opponent-model.js），样本够了自动判断松紧。
+//   它不是一种真正的"风格"（没有 percent），而是"让机器人替你选"，所以单独定义、不放进 OPPONENT_STYLES。
+export const OPPONENT_STYLE_AUTO = 'auto';
+export const OPPONENT_STYLE_AUTO_OPTION = {
+  id: OPPONENT_STYLE_AUTO,
+  label: '自动识别（推荐）',
+  desc: '机器人边打边记对手的入池频率，观察够了自动判断这桌是松还是紧；样本不够时先按"标准"算。',
+};
+
+// 自动识别还没观察够样本时，临时按哪种风格算（标准，比纯随机更接近真实牌局）。
+export const AUTO_FALLBACK_STYLE = 'normal';
+
+// 面板"对手类型"下拉框的全部选项：自动识别 + 四种手选风格。
+export const OPPONENT_STYLE_OPTIONS = [OPPONENT_STYLE_AUTO_OPTION, ...OPPONENT_STYLES];
+
+// 默认对手类型：自动识别。
+export const DEFAULT_OPPONENT_STYLE = OPPONENT_STYLE_AUTO;
+
+// 小工具：按 id 取对手类型的中文名（查不到原样返回），面板和决策说明共用，避免界面里冒出英文 id。
+export function getOpponentStyleLabel(styleId) {
+  const found = OPPONENT_STYLE_OPTIONS.find((s) => s.id === styleId);
+  return found ? found.label : styleId;
+}
 
 // 小工具：按风格 id 查对应的 percent（查不到就回退成"随机 100%"，保证不崩）。
 export function getOpponentPercent(styleId) {
@@ -242,8 +289,8 @@ export const STRATEGY_TIERS = [
   },
   {
     id: 'complex',
-    label: '档位②·复杂判断',
-    desc: '在简单规则上叠加成手牌力、听牌隐含赔率、多人底池、牌面阶段等因素，取舍更细。',
+    label: '档位②·复杂判断（推荐）',
+    desc: '翻牌前看起手牌和位置，翻牌后综合牌型、听牌、牌面和对手下注大小来决定。目前最强的一档。',
     strategy: 'complex',
     available: true,
   },
@@ -256,8 +303,8 @@ export const STRATEGY_TIERS = [
   },
 ];
 
-// 默认档位：从最稳妥、最好理解的"简单托管"开始。
-export const DEFAULT_STRATEGY_TIER = 'simple';
+// 默认档位：用目前最强的"复杂判断"档（简单档只作对照/保底）。
+export const DEFAULT_STRATEGY_TIER = 'complex';
 
 // 小工具：按档位 id 查配置（查不到回退到默认档，保证不崩）。
 export function getStrategyTier(tierId) {
@@ -273,7 +320,7 @@ export const AGGRESSION_PROFILES = [
   {
     id: 'cautious',
     label: '稳健',
-    desc: '提高入池和价值下注门槛，关闭主动半诈唬，波动更小。',
+    desc: '整体收紧：跟注和下注都要求更高的胜率，不主动半诈唬，输赢波动小。',
     decision: {
       thresholdShift: 2,
       preflopOddsShift: -4,
@@ -284,7 +331,7 @@ export const AGGRESSION_PROFILES = [
   {
     id: 'balanced',
     label: '均衡',
-    desc: '保持当前复杂策略的标准门槛，兼顾价值下注与合理施压。',
+    desc: '标准门槛：有把握就下注要钱，有强听牌时适当施压。',
     decision: {
       thresholdShift: 0,
       preflopOddsShift: 0,
@@ -295,7 +342,7 @@ export const AGGRESSION_PROFILES = [
   {
     id: 'aggressive',
     label: '激进',
-    desc: '适度放宽入池和价值下注门槛，并保留半诈唬机会。',
+    desc: '整体放宽：胜率稍低也敢跟、敢下注，保留半诈唬。',
     decision: {
       thresholdShift: -2,
       preflopOddsShift: 5,
@@ -311,6 +358,45 @@ export function getAggressionProfile(profileId) {
   return (
     AGGRESSION_PROFILES.find((profile) => profile.id === profileId) ||
     AGGRESSION_PROFILES.find((profile) => profile.id === DEFAULT_AGGRESSION_PROFILE)
+  );
+}
+
+// 翻牌前「入池意愿」：看翻牌的费用很小时，要不要用一般甚至偏差的牌去看一张翻牌。
+//   讲人话：只花 1~3 个大盲就能看到 3 张公共牌，万一中了两对/暗三/顺子，常常能从对手那里赢回很多（隐含赔率），
+//   所以"便宜看牌"长期往往是赚的。但筹码太浅时中了也赢不回多少，所以还要求费用占剩余筹码的比例不能太高。
+//   只由复杂策略读取。字段含义：
+//     cheapMaxBb       —— 看牌费 ≤ 这么多个大盲，算"便宜"（略高于整数，避免 1.0 这种边界因为小数误差判错）
+//     cheapMinScore    —— 便宜时，起手牌强度（Chen 分）≥ 这个值就去看。同花连张/同花A/口袋对子不受此限
+//                         参考：72o=-1、94o=0、J5o=1、Q2o=2、96o=3、J8o=4、Q5s=4、KTo=6
+//     cheapMaxStackPct —— 看牌费同时不能超过剩余筹码的这个百分比（筹码浅时不乱看）
+//     fallbackStackPct —— 拿不到大盲数据时的备选判断：看牌费 ≤ 剩余筹码这个百分比算便宜
+export const PREFLOP_ENTRY_PROFILES = [
+  {
+    id: 'standard',
+    label: '标准',
+    desc: '只差 1 个大盲以内，才用一般的牌去看翻牌；偏差的牌照样弃掉。',
+    decision: { cheapMaxBb: 1.05, cheapMinScore: 4, cheapMaxStackPct: 10, fallbackStackPct: 2 },
+  },
+  {
+    id: 'loose',
+    label: '积极',
+    desc: '看翻牌只要 ≤ 2 个大盲，除了最差的一批牌（如 72o、83o），都便宜去看一张。',
+    decision: { cheapMaxBb: 2.05, cheapMinScore: 1, cheapMaxStackPct: 6, fallbackStackPct: 3 },
+  },
+  {
+    id: 'wide',
+    label: '很积极',
+    desc: '看翻牌只要 ≤ 3 个大盲，几乎任何两张牌都去看。适合对手很少加注、被动的桌子。',
+    decision: { cheapMaxBb: 3.05, cheapMinScore: -10, cheapMaxStackPct: 8, fallbackStackPct: 4 },
+  },
+];
+
+export const DEFAULT_PREFLOP_ENTRY_PROFILE = 'standard';
+
+export function getPreflopEntryProfile(profileId) {
+  return (
+    PREFLOP_ENTRY_PROFILES.find((profile) => profile.id === profileId) ||
+    PREFLOP_ENTRY_PROFILES.find((profile) => profile.id === DEFAULT_PREFLOP_ENTRY_PROFILE)
   );
 }
 
@@ -346,6 +432,74 @@ export function getValueBetProfile(profileId) {
   );
 }
 
+// ============ 下注尺度（bet-sizing.js 使用）============
+// 讲人话：River 的金额框填的是"加注至"（本轮我一共下到多少），不是"再多下多少"。
+//   所有策略都先说"我想再投入底池的百分之几 / 几个大盲"，再由 bet-sizing.js 统一换算成"加注至"金额，
+//   并按筹码深度(SPR)决定是否直接全下、是否需要封顶。参数集中在这里方便调。
+export const SIZING = {
+  // —— 翻牌前（按大盲计）——
+  OPEN_RAISE_BB: 2.5, // 无人加注时开池：加注至 2.5 个大盲
+  OPEN_PER_LIMPER_BB: 1, // 前面每有 1 个人平跟，开池再多加 1 个大盲（惩罚平跟者）
+  MAX_LIMPERS_COUNTED: 4, // 平跟人数最多按 4 个算，防止底池数据异常时开得离谱
+  THREEBET_IP_MULT: 3, // 有位置时 3-bet：加注至 = 对手加注额 × 3
+  THREEBET_OOP_MULT: 3.5, // 没位置/位置未知时 3-bet：× 3.5（没位置要打大一点）
+  FOURBET_MULT: 2.3, // 面对 3-bet 再加注（4-bet）：× 2.3
+  FOURBET_TRIGGER_BB: 6, // 对手"加注至"超过 6 个大盲，就认为面对的是 3-bet 以上
+
+  // —— 筹码深度 / 封顶 ——
+  // SPR = 剩余筹码 ÷ 底池。SPR 越小，说明筹码相对底池越浅，好牌越应该直接全下。
+  STRONG_COMMIT_SPR: 2.5, // 强牌（三条~同花）：SPR ≤ 2.5 允许全下
+  MONSTER_COMMIT_SPR: 4, // 超强牌（葫芦以上）：SPR ≤ 4 允许全下
+  COMMIT_RATIO: 0.6, // 强牌本次投入已超过剩余筹码 60%：干脆全下（剩一点筹码没意义还暴露意图）
+  NORMAL_STACK_CAP: 0.33, // 普通牌（顶对/半诈唬/保护注）：单次最多投入剩余筹码的 1/3
+  NO_STACK_POT_CAP: 1.0, // 拿不到筹码数据时：普通牌单次最多投入 1 倍底池
+  NO_STACK_POT_CAP_STRONG: 2.0, // 拿不到筹码数据时：强牌单次最多投入 2 倍底池
+};
+
+// ============ 对手范围收窄（opponent-range.js 使用）============
+// 讲人话：对手真金白银下大注时，他手里通常是好牌。如果还按"他啥牌都玩"去算胜率，
+//   胜率会被高估、导致乱跟。所以面对下注/加注时要收窄对手范围，分两层：
+//   ① 翻牌前：按"对手加注 / 3-bet"把起手牌范围百分比乘一个 <1 的系数（factor）。
+//   ② 翻牌后：光看起手牌不够（AK 是好起手牌，但在 J J 8 3 2 上没中，河牌很少下大注）。
+//      所以按"对手这手牌在当前公共牌上中了什么"给它一个【下注可能性】权重（0~1），
+//      模拟时按权重抽对手的牌：成手多抽、空气牌（诈唬）少抽，注越大/越是加注，空气和小对子越少。
+//   权重表的 key 对应 hand-class.js 的成手分级 / 听牌强弱：
+//     monster 葫芦以上 | strong 两对/三条/顺子/同花 | top_pair 顶对/超对 | weak_pair 小对子
+//     none 没中（诈唬牌） | drawStrong 强听牌（同花/两头顺，河牌没有） | drawWeak 卡顺
+//   一手牌既有成手又有听牌时，取两者里更大的权重。
+export const RANGE_NARROWING = {
+  MIN_PERCENT: 8, // 再怎么收窄，对手范围也不低于前 8%（避免把对手想成只有 AA）
+  PREFLOP_RAISE_FACTOR: 0.55, // 翻牌前面对加注：对手范围 × 0.55
+  PREFLOP_3BET_FACTOR: 0.3, // 翻牌前面对 3-bet 以上：× 0.3
+  // 翻牌后面对下注：按"下注 ÷ 底池"分档（maxRatio 为上界，从小到大匹配第一档）
+  POSTFLOP_BET_TIERS: [
+    {
+      maxRatio: 0.4,
+      label: '小注',
+      weights: { monster: 1, strong: 1, top_pair: 0.9, weak_pair: 0.6, none: 0.35, drawStrong: 0.8, drawWeak: 0.5 },
+    },
+    {
+      maxRatio: 0.8,
+      label: '中注',
+      weights: { monster: 1, strong: 1, top_pair: 0.8, weak_pair: 0.35, none: 0.18, drawStrong: 0.65, drawWeak: 0.3 },
+    },
+    {
+      maxRatio: Infinity,
+      label: '大注',
+      weights: { monster: 1, strong: 1, top_pair: 0.6, weak_pair: 0.15, none: 0.1, drawStrong: 0.5, drawWeak: 0.15 },
+    },
+  ],
+  // 我先下注、对手再加注（翻牌后的"加注"）：这是最强的信号，小对子和空气几乎不会这么打。
+  POSTFLOP_RAISE: {
+    label: '加注',
+    weights: { monster: 1, strong: 0.9, top_pair: 0.3, weak_pair: 0.05, none: 0.04, drawStrong: 0.4, drawWeak: 0.08 },
+  },
+  // 河牌没有后续牌可补，诈唬更少：在上面任一档的基础上，空气牌权重再 × 这个系数。
+  RIVER_BLUFF_FACTOR: 0.8,
+  // 多人底池里"下注的那个人"之外的其他对手：多半是跟注/待行动，范围比下注者宽，用这张表。
+  POSTFLOP_CALLER_WEIGHTS: { monster: 1, strong: 1, top_pair: 0.9, weak_pair: 0.55, none: 0.2, drawStrong: 0.85, drawWeak: 0.45 },
+};
+
 // 托管运行参数：集中管理"自动打牌"的节奏与安全阀。
 export const AUTOPILOT = {
   // 托管总开关的默认值：默认【关闭】。必须用户在面板上手动打开才会自动动作，
@@ -369,6 +523,10 @@ export const AUTOPILOT = {
   //   防止因为页面状态抖动导致对同一个局面连点好几下。
   ACTION_COOLDOWN_MS: 2500,
 
+  // 防重复（按局面指纹）：对【完全相同的局面】已经出过手，就不再出手；
+  //   但如果过了这么久局面还没变（比如点击没被站点接收），允许重试一次，避免卡死。
+  SAME_STATE_RETRY_MS: 8000,
+
   // 「房主·自动开始下一手」默认值：默认【开启】。
   //   注意：它受总开关管辖——只有托管总开关打开时才会生效，所以默认开也安全。
   //   作用：房主需要手动点"开始下一手"才能进下一局，这里替房主自动点，避免卡在局间。
@@ -387,6 +545,10 @@ export const AUTOPILOT = {
 //   1) 先按 selectors 里的 CSS 选择器找（最精确，确认站点结构后在这里补）；
 //   2) 找不到就退而求其次：遍历页面上的 <button>，看它的文字是否包含 textIncludes 里的词。
 //
+// "预选动作"按钮的排除词：很多牌桌在没轮到你时也会显示"自动过牌 / 过牌或弃牌"这类预选开关，
+//   文字里同样含"弃牌/过牌"。它们不是真正的行动按钮，识别轮次和执行动作时都要排除。
+export const PRE_ACTION_EXCLUDE_TEXT = ['自动', '预选', '/', 'auto'];
+
 // 下面的 selectors 已用测试账号登录目标站（River，47.243.178.16）核对过真实 DOM：
 //   - 底部动作区容器 class = ".table-action-zone"
 //   - 跟注按钮 class 含 "is-call"（完整：button primary-action is-call）
@@ -399,11 +561,14 @@ export const ACTION_BUTTON_RULES = {
     //   直接交给文字兜底"弃牌"更稳，这里保持为空。
     selectors: [],
     textIncludes: ['弃牌', 'fold', 'Fold'],
+    // 排除"自动弃牌/预选"这类没轮到你时也常驻的预选按钮（防止误判轮次、误点）。
+    excludeText: PRE_ACTION_EXCLUDE_TEXT,
   },
   [POKER_ACTION.CHECK]: {
     // 过牌按钮本次未观察到（局面是"要跟注"），暂不写精确选择器，靠文字兜底。
     selectors: [],
     textIncludes: ['过牌', 'check', 'Check'],
+    excludeText: PRE_ACTION_EXCLUDE_TEXT,
   },
   [POKER_ACTION.CALL]: {
     // 跟注按钮：River 用 .is-call 做专属标记（限定在动作区内，避免误伤别处）。
@@ -418,9 +583,13 @@ export const ACTION_BUTTON_RULES = {
   },
 };
 
-// "轮到你了"的识别规则：页面轮到当前玩家行动时，通常会出现特定文案或高亮元素。
-//   同样先给文案候选，CSS 选择器等核对真实 DOM 后再补精确值。
+// "轮到你了"的识别规则（按可靠度从高到低）：
+//   1) actionZoneSelectors：River 底部动作区(.table-action-zone)里出现【可点的】弃牌/过牌/跟注按钮 => 轮到我；
+//      这是最可靠的判据——没轮到你时这些按钮不会出现或是禁用的。
+//   2) selectors：轮到我时会出现的高亮元素（待核对后补）；
+//   3) textIncludes：页面上"轮到你"之类的提示文字兜底。
 export const TURN_INDICATOR_RULES = {
+  actionZoneSelectors: ['.table-action-zone'],
   selectors: [], // 例如：['.action-bar--active', '.your-turn']，待核对后补
   textIncludes: ['轮到你', '该你', 'your turn', 'Your Turn'],
 };
@@ -475,5 +644,32 @@ export const STORAGE_KEYS = {
   OPPONENT_STYLE: 'autopilot_opponent_style', // 选中的对手牌力风格 id（决策与胜率共用）
   AGGRESSION_PROFILE: 'autopilot_aggression_profile', // 整体打法：稳健/均衡/激进
   VALUE_BET_PROFILE: 'autopilot_value_bet_profile', // 大牌下注：标准/强势/最大化
+  PREFLOP_ENTRY_PROFILE: 'autopilot_preflop_entry_profile', // 入池意愿：标准/积极/很积极
   AUTO_NEXT_HAND: 'autopilot_auto_next_hand', // 房主：自动开始下一手（true/false）
 };
+
+// 托管配置项对照表：配置字段名 -> storage 键 -> 默认值（数据驱动：加一个配置只改这里）。
+//   面板（写）和托管控制器（读）共用这一张表，保证两边认的是同一套配置。
+export const AUTOPILOT_CONFIG_FIELDS = [
+  { field: 'enabled', key: STORAGE_KEYS.AUTOPILOT_ENABLED, fallback: AUTOPILOT.DEFAULT_ENABLED },
+  { field: 'tier', key: STORAGE_KEYS.STRATEGY_TIER, fallback: DEFAULT_STRATEGY_TIER },
+  { field: 'opponentStyle', key: STORAGE_KEYS.OPPONENT_STYLE, fallback: DEFAULT_OPPONENT_STYLE },
+  { field: 'aggressionProfile', key: STORAGE_KEYS.AGGRESSION_PROFILE, fallback: DEFAULT_AGGRESSION_PROFILE },
+  { field: 'valueBetProfile', key: STORAGE_KEYS.VALUE_BET_PROFILE, fallback: DEFAULT_VALUE_BET_PROFILE },
+  { field: 'preflopEntryProfile', key: STORAGE_KEYS.PREFLOP_ENTRY_PROFILE, fallback: DEFAULT_PREFLOP_ENTRY_PROFILE },
+  { field: 'autoNextHand', key: STORAGE_KEYS.AUTO_NEXT_HAND, fallback: AUTOPILOT.AUTO_NEXT_HAND },
+];
+
+// 面板界面参数
+export const PANEL_UI = {
+  HISTORY_PREVIEW: 5, // 动作历史默认只显示最近几条，点"展开"看全部
+  CLOCK_TICK_MS: 30000, // "本场时长"多久刷新一次
+  RECONNECT_MS: 1000, // 和后台的连接断了（后台被休眠/重启）多久后重连
+  CONFIRM_RESET_MS: 3000, // "重置统计"要连点两次确认，第二次点击的有效时间
+};
+
+// "开始下一手"在动作历史里的标识（它不是扑克动作，但要和扑克动作一起显示在历史里）
+export const NEXT_HAND_ACTION = 'next_hand';
+
+// 公共牌张数 -> 街道名称（面板显示"现在打到哪一街"用）
+export const STREET_NAMES = { 0: '翻牌前', 3: '翻牌', 4: '转牌', 5: '河牌' };
