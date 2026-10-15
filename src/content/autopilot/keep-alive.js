@@ -12,15 +12,20 @@
  *   就把它当成"用户还在用"，不再给它的定时器降速。
  *   副作用：标签上会出现一个小喇叭图标，但音量极小、频率极低，人耳完全听不到。
  *
+ * ⚠️ 浏览器的"自动播放"限制（重点）：
+ *   Chrome 规定——音频必须在【用户手势之后】才能创建/播放。否则一创建就会在控制台报：
+ *     "The AudioContext was not allowed to start..."。
+ *   所以本模块【不抢跑】：开启托管时若还没有页面手势，就【先不创建音频】，
+ *   只挂一次性监听，等用户下次点一下游戏页面再创建并播放。这样控制台一条警告都不会有。
+ *
  * ⚠️ 能力边界：它【只能解决"后台标签降速"】。
  *   如果整台电脑睡眠，浏览器被操作系统整体挂起，所有网页脚本一律停摆——
  *   这不是任何网页/插件能解决的，需要在系统层面阻止睡眠（见 README「后台运行与睡眠」）。
  *
- * 设计（单一职责 + 单例）：
+ * 设计（单一职责 + 单例 + 懒加载）：
  *   - 只对外暴露 start / stop 两个方法，内部状态自管，避免散落全局变量。
- *   - 用 Web Audio 生成静音：振荡器(Oscillator) → 音量控制(Gain，开到极小) → 扬声器。
- *   - 浏览器规定"音频必须在用户手势之后才能播放"，所以首次若没声音权限，
- *     就挂一次性的交互监听，等用户下次点一下页面再解锁，不打扰、不报错。
+ *   - 音频用 Web Audio 生成：振荡器(Oscillator) → 音量(Gain，开到极小) → 扬声器。
+ *   - AudioContext 一律【等到用户手势时才创建】，杜绝自动播放警告。
  */
 
 import { AUTOPILOT } from '../../common/constants.js';
@@ -29,10 +34,11 @@ const CFG = AUTOPILOT.KEEP_ALIVE;
 
 // ============ 单例状态（集中管理，避免重复创建音频节点） ============
 const state = {
+  wantActive: false, // 外部是否希望保活（跟随托管开关；是真正的"意图"开关）
   audioCtx: null, // Web Audio 的音频上下文（整段静音的"播放器"）
   oscillator: null, // 振荡器节点：持续产生一个极低频的声音
   gain: null, // 音量节点：把音量压到几乎为 0
-  running: false, // 是否已在播放（防止重复 start）
+  running: false, // 是否已在真正播放（防止重复创建）
   unlockBound: false, // 是否已挂上"等用户手势解锁"的监听（防止重复挂）
 };
 
@@ -43,12 +49,23 @@ function audioSupported() {
 }
 
 /**
- * 真正开始播放静音：建好"振荡器 → 音量 → 扬声器"的链路。
- *   只建一次；若音频上下文被浏览器挂起（没拿到播放权限），返回 false 让调用方去等手势。
+ * 当前页面是否已经有过"用户手势"。
+ *   有手势才允许创建/播放音频；没有就必须等。navigator.userActivation 是标准 API，
+ *   拿不到时（老浏览器）保守返回 false，走"等手势"的路径，绝不抢跑。
+ */
+function hasUserGesture() {
+  const ua = typeof navigator !== 'undefined' ? navigator.userActivation : null;
+  if (!ua) return false;
+  return !!(ua.isActive || ua.hasBeenActive);
+}
+
+/**
+ * 【只在确有用户手势时调用】真正建好"振荡器 → 音量 → 扬声器"的链路并发声。
+ *   注意：调用方必须先确认 hasUserGesture() 或处于手势回调内，否则会触发自动播放警告。
  */
 function startSilentTone() {
-  if (state.running) return true;
-  if (!audioSupported()) return false;
+  if (state.running) return;
+  if (!audioSupported()) return;
 
   // 1) 建音频上下文（相当于一个"播放器"）。兼容老式带 webkit 前缀的写法。
   const Ctx = window.AudioContext || window['webkitAudioContext'];
@@ -65,32 +82,25 @@ function startSilentTone() {
   state.gain.connect(ctx.destination);
   state.oscillator.start();
 
-  state.running = true;
-
-  // 4) 如果上下文被浏览器挂起（常见于"还没有用户手势"），尝试恢复；
-  //    恢复不了也不报错，交给外层挂手势监听后再 resume。
+  // 4) 处于手势回调里，resume 是被允许的；恢复不了也不报错。
   if (ctx.state === 'suspended' && typeof ctx.resume === 'function') {
     ctx.resume().catch(() => {});
-    return ctx.state === 'running';
   }
-  return true;
+  state.running = true;
 }
 
 /**
  * 挂一次性的"用户手势解锁"监听：
- *   浏览器要求音频在用户交互后才能真正出声。开启托管的那一下不一定带手势，
- *   所以等用户下次点一下页面（任意处）/按键，再把音频上下文恢复过来。
+ *   没有手势时不碰音频，只等用户下次点一下游戏页面（任意处）/按键，
+ *   在那个手势回调里再创建并播放音频——此时浏览器允许，不会报警告。
  */
 function bindUnlockOnce() {
   if (state.unlockBound) return;
   state.unlockBound = true;
 
   const unlock = () => {
-    if (state.audioCtx && typeof state.audioCtx.resume === 'function') {
-      state.audioCtx.resume().catch(() => {});
-    }
-    // 解锁一次就够：无论是否已开始托管，都把监听摘掉，避免长期占用。
-    removeUnlock();
+    removeUnlock(); // 先摘监听：解锁一次即可，避免长期占用
+    if (state.wantActive) startSilentTone(); // 若这期间没被关掉，就在手势里起音
   };
   const removeUnlock = () => {
     for (const evt of CFG.UNLOCK_EVENTS) {
@@ -108,12 +118,18 @@ function bindUnlockOnce() {
 // ============ 对外接口 ============
 /**
  * 开启后台保活（跟随托管开关调用）。
- *   幂等：重复调用不会重复建音频；拿不到播放权限时自动挂手势监听，等用户点一下再出声。
+ *   幂等。时序安全：已有手势就立刻起音；没手势就只挂监听、等用户点一下，绝不抢跑报警告。
  */
 export function startKeepAlive() {
   if (!CFG.ENABLED) return; // 配置里关掉了就什么都不做
-  const ok = startSilentTone();
-  if (!ok) bindUnlockOnce(); // 还没拿到声音权限：等用户下次交互再解锁
+  state.wantActive = true;
+  if (state.running) return;
+
+  if (hasUserGesture()) {
+    startSilentTone(); // 已经有过手势：直接起音
+  } else {
+    bindUnlockOnce(); // 还没手势：等用户下次点页面再起音
+  }
 }
 
 /**
@@ -121,6 +137,7 @@ export function startKeepAlive() {
  *   把音频链路拆掉、上下文关掉，释放资源，标签上的小喇叭图标随之消失。
  */
 export function stopKeepAlive() {
+  state.wantActive = false; // 先置意图为关：即便此刻还有待触发的手势监听，也不会再起音
   try {
     if (state.oscillator) {
       state.oscillator.stop();

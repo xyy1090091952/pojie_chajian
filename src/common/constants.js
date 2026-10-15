@@ -314,8 +314,10 @@ export function getStrategyTier(tierId) {
   );
 }
 
-// 整体打法倾向：控制“愿不愿意入池/跟注/半诈唬”，不直接放大下注金额。
+// 整体打法倾向：控制“愿不愿意入池/跟注/半诈唬”，以及“诈唬下注打多大”。
 //   这些参数只由复杂策略读取；简单策略保持原逻辑，避免两个档位互相污染。
+//   bluffSizeMult —— 诈唬下注的放大系数（只作用于半诈唬/试探注这类"吓退"性质的下注，
+//                    不影响价值下注；最终金额仍受牌桌合法范围与筹码封顶保护，不会误全下）。
 export const AGGRESSION_PROFILES = [
   {
     id: 'cautious',
@@ -326,28 +328,31 @@ export const AGGRESSION_PROFILES = [
       preflopOddsShift: -4,
       valueGateShift: 3,
       allowSemiBluff: false,
+      bluffSizeMult: 1.0, // 稳健档本就不诈唬，这里只做兜底，不生效
     },
   },
   {
     id: 'balanced',
     label: '均衡',
-    desc: '标准门槛：有把握就下注要钱，有强听牌时适当施压。',
+    desc: '标准门槛：有把握就下注要钱，有强听牌时适当施压（诈唬打 2/3 池级别，有压迫力）。',
     decision: {
       thresholdShift: 0,
       preflopOddsShift: 0,
       valueGateShift: 0,
       allowSemiBluff: true,
+      bluffSizeMult: 1.0, // 诈唬按基准尺度（约 2/3 池）
     },
   },
   {
     id: 'aggressive',
     label: '激进',
-    desc: '整体放宽：胜率稍低也敢跟、敢下注，保留半诈唬。',
+    desc: '整体放宽：胜率稍低也敢跟、敢下注，诈唬打得更大（接近满池），更能把对手吓弃牌。',
     decision: {
       thresholdShift: -2,
       preflopOddsShift: 5,
       valueGateShift: -4,
       allowSemiBluff: true,
+      bluffSizeMult: 1.25, // 诈唬在基准上再放大 25%，压迫力更强
     },
   },
 ];

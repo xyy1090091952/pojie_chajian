@@ -94,8 +94,8 @@ const RATIO = {
   RIVER_STRONG: 0.7,
   RIVER_THIN: 0.45,
   PROTECT: 0.5,
-  SEMI_BLUFF: 0.55,
-  PROBE: 0.33,
+  SEMI_BLUFF: 0.72, // 半诈唬：约 2/3 池起步，才有"吓退"的压迫力（原 0.55 太小，对手花小钱就能跟）
+  PROBE: 0.5, // 单挑试探/持续下注：半池（原 0.33 太小，没中的牌也懒得弃）
   RAISE_STRONG: 0.6, // 面对下注加注：加注至 = 最高注 + 0.6 ×(跟注后底池)，约 3 倍对手下注
   RAISE_MONSTER: 0.7,
 };
@@ -343,6 +343,8 @@ function decidePostflop(ctx, eq, knobs, rng) {
   // 松桌(valueStretch>1)更薄地要价值；紧桌反之。
   const valueThin = (profile.valueStretch - 1) * 10;
   const allowBluff = profile.bluffBias >= 0.75 && aggression.allowSemiBluff;
+  // 诈唬放大系数：由「打法倾向」决定（均衡 ×1.0、激进 ×1.25）。只放大诈唬/试探注，不碰价值下注。
+  const bluffMult = Number(aggression.bluffSizeMult) || 1;
   const isStrongMade = made === MADE.MONSTER || made === MADE.STRONG;
   const madeText = MADE_LABEL[made];
 
@@ -375,10 +377,10 @@ function decidePostflop(ctx, eq, knobs, rng) {
         kind: 'pot', ratio: RATIO.RIVER_THIN, strength: SIZE_STRENGTH.NORMAL,
       });
     }
-    // A4 强听牌半诈唬：对手少、桌风允许诈唬、还有牌可补。
+    // A4 强听牌半诈唬：对手少、桌风允许诈唬、还有牌可补。下得够大才能逼对手弃牌。
     if (draw === DRAW.STRONG && opponents <= SEMI_BLUFF_MAX_OPP && allowBluff) {
       return act(POKER_ACTION.RAISE, `强听牌半诈唬（对手弃牌就赢、成牌赢大池）`, {
-        kind: 'pot', ratio: RATIO.SEMI_BLUFF * textureMult, strength: SIZE_STRENGTH.NORMAL,
+        kind: 'pot', ratio: RATIO.SEMI_BLUFF * textureMult * bluffMult, strength: SIZE_STRENGTH.NORMAL,
       });
     }
     // A5 湿面保护：胜率中上、还有牌要发 => 下注别让对手免费补牌。
@@ -387,10 +389,10 @@ function decidePostflop(ctx, eq, knobs, rng) {
         kind: 'pot', ratio: RATIO.PROTECT * textureMult, strength: SIZE_STRENGTH.NORMAL,
       });
     }
-    // A6 单挑试探注（相当于持续下注/探池）：干/中性牌面、胜率不差，小注就能逼走很多没中的牌。
+    // A6 单挑试探注（相当于持续下注/探池）：干/中性牌面、胜率不差，下够大才逼得走没中的牌。
     if (!isRiver && opponents === 1 && allowBluff && !wet && equity >= PROBE_MIN_EQUITY && rng() < PROBE_FREQUENCY) {
-      return act(POKER_ACTION.RAISE, `单挑、牌面不湿、胜率 ${equity}%，下小注试探（对手没中多半会弃）`, {
-        kind: 'pot', ratio: RATIO.PROBE, strength: SIZE_STRENGTH.NORMAL,
+      return act(POKER_ACTION.RAISE, `单挑、牌面不湿、胜率 ${equity}%，下注试探（对手没中多半会弃）`, {
+        kind: 'pot', ratio: RATIO.PROBE * bluffMult, strength: SIZE_STRENGTH.NORMAL,
       });
     }
     return act(POKER_ACTION.CHECK, `可免费过牌，胜率 ${equity}%（${madeText}）不够下注，过牌。`);
