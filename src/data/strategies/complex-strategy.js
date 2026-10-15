@@ -31,6 +31,7 @@ import {
   getAggressionProfile,
   getValueBetProfile,
   getPreflopEntryProfile,
+  BOARD_DANGER,
 } from '../../common/constants.js';
 import { potOdds } from '../equity-engine.js';
 import { detectDraws, analyzeBoardTexture, BOARD_TEXTURE } from '../poker-engine.js';
@@ -126,6 +127,35 @@ function sizeStrengthOf(made) {
   if (made === MADE.MONSTER) return SIZE_STRENGTH.MONSTER;
   if (made === MADE.STRONG) return SIZE_STRENGTH.STRONG;
   return SIZE_STRENGTH.NORMAL;
+}
+
+/**
+ * 「危险牌面」给非强牌加的跟注门槛（百分点）。
+ *   讲人话：转牌/河牌出现已成同花、已成顺、公共牌成对时，对手下注多半已握大牌组。
+ *   自己只有顶对及以下的非强牌，就该更谨慎——按威胁强度累加惩罚，但封顶，避免矫枉过正。
+ *   强牌（三条/顺子/同花以上）不走这里（调用处已排除）。
+ * @param {object} texture analyzeBoardTexture 的结果
+ * @param {number} street  已翻公共牌张数（4=转牌、5=河牌）
+ * @returns {{penalty:number, note:string}}
+ */
+function dangerPenalty(texture, street) {
+  // 翻牌（3 张）还早、牌面没定型，不加严。
+  if (!texture || street < BOARD_DANGER.MIN_STREET) return { penalty: 0, note: '' };
+
+  let penalty = 0;
+  const hits = [];
+  // 同花：已成(made) / 4 张同色(strong) 才算危险；3 张同色只是听牌，不加。
+  const flush = BOARD_DANGER.FLUSH[texture.flushRisk];
+  if (flush) { penalty += flush; hits.push('同花'); }
+  // 顺子：4 连(made) / 3 连(strong) 才算危险；略带连张不加。
+  const straight = BOARD_DANGER.STRAIGHT[texture.straightRisk];
+  if (straight) { penalty += straight; hits.push('顺子'); }
+  // 公共牌成对：可能有人中三条/葫芦。
+  if (texture.paired) { penalty += BOARD_DANGER.PAIRED; hits.push('公对'); }
+
+  penalty = Math.min(penalty, BOARD_DANGER.MAX_PENALTY); // 叠加封顶，别把能跟的牌也全吓弃
+  const note = penalty > 0 ? `危险牌面(${hits.join('/')})门槛+${penalty}` : '';
+  return { penalty, note };
 }
 
 // ======================= 翻牌前 =======================
@@ -369,8 +399,11 @@ function decidePostflop(ctx, eq, knobs, rng) {
   // ========== B：面对下注 ==========
   const breakeven = potOddsPct(pot, toCall);
   const multiway = Math.max(0, opponents - 1) * MULTIWAY_CALL_PENALTY;
-  const required = breakeven + multiway + tightness;
+  // 危险牌面（成同花/成顺/公对）：只对"非强牌"加跟注门槛，强牌不受影响、照常跟/加。
+  const danger = isStrongMade ? { penalty: 0, note: '' } : dangerPenalty(texture, street);
+  const required = breakeven + multiway + tightness + danger.penalty;
   const reqText = Math.round(required);
+  const dangerText = danger.note ? `，${danger.note}` : '';
 
   // B1 强成手 + 胜率远超回本线 => 加注（价值加注 / 过牌加注）。
   if (isStrongMade && equity >= breakeven + RAISE_EDGE && equity >= fairShare + VALUE_EDGE) {
@@ -382,7 +415,7 @@ function decidePostflop(ctx, eq, knobs, rng) {
   }
   // B2 胜率够本 => 跟注。
   if (equity >= required) {
-    return act(POKER_ACTION.CALL, `胜率 ${equity}% ≥ 门槛 ${reqText}%（${madeText}），跟注划算。`);
+    return act(POKER_ACTION.CALL, `胜率 ${equity}% ≥ 门槛 ${reqText}%（${madeText}${dangerText}），跟注划算。`);
   }
   // B3 强听牌 + 筹码够深 => 靠隐含赔率跟注。
   const impliedOk = !hasStack || toCall <= stack * IMPLIED_MAX_STACK_RATIO;
@@ -392,7 +425,7 @@ function decidePostflop(ctx, eq, knobs, rng) {
   // B4 其余 => 弃牌。
   return act(
     POKER_ACTION.FOLD,
-    `胜率 ${equity}% 低于门槛 ${reqText}%（${madeText}${opponents > 1 ? `、${opponents} 人池` : ''}），弃牌。`
+    `胜率 ${equity}% 低于门槛 ${reqText}%（${madeText}${opponents > 1 ? `、${opponents} 人池` : ''}${dangerText}），弃牌。`
   );
 }
 

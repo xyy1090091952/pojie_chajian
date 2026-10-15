@@ -35,6 +35,8 @@ import {
 } from '../../common/constants.js';
 import { isMyTurn } from './turn-detector.js';
 import { executeDecision, clickNextHand } from './action-executor.js';
+// 后台保活：托管开启时播放静音，防止浏览器把"后台标签"的轮询定时器降速（详见 keep-alive.js）。
+import { startKeepAlive, stopKeepAlive } from './keep-alive.js';
 
 // 配置项对照表（字段 -> storage 键 -> 默认值）统一放在 constants.js，面板和这里共用
 const CONFIG_FIELDS = AUTOPILOT_CONFIG_FIELDS;
@@ -87,9 +89,11 @@ function syncLoop() {
   if (state.enabled && !state.timer) {
     state.lastStatusKey = ''; // 重新开启后允许再次上报"等待中"
     state.timer = setInterval(tick, AUTOPILOT.TURN_POLL_MS);
+    startKeepAlive(); // 开启托管：播放静音，防止后台标签把轮询降速
   } else if (!state.enabled && state.timer) {
     clearInterval(state.timer);
     state.timer = null;
+    stopKeepAlive(); // 关闭托管：停掉静音，释放资源（标签上的小喇叭随之消失）
   }
 }
 

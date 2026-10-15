@@ -30,6 +30,7 @@
         "src/content/autopilot/turn-detector.js",
         "src/content/autopilot/action-executor.js",
         "src/content/autopilot/dom-locator.js",
+        "src/content/autopilot/keep-alive.js",
         "src/common/constants.js"
       ],
       "matches": ["https://47.243.178.16/*"]
