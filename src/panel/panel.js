@@ -131,6 +131,8 @@ const dom = {
   opponentStyle: $('opponentStyle'),
   styleDesc: $('styleDesc'),
   oppStatus: $('oppStatus'), // 对手类型下方的一行状态：此刻实际按哪种对手算
+  exploitMode: $('exploitMode'), // 剥削模式开关（针对线上对手 AI 的固定弱点）
+  exploitDesc: $('exploitDesc'), // 剥削模式说明文字（非复杂档时提示置灰原因）
 };
 
 // 每个配置字段对应哪个控件、控件是开关还是下拉（数据驱动：加配置只改这里 + constants）
@@ -142,6 +144,7 @@ const CONFIG_CONTROLS = [
   { field: 'aggressionProfile', el: dom.aggressionProfile, type: 'select' },
   { field: 'valueBetProfile', el: dom.valueBetProfile, type: 'select' },
   { field: 'opponentStyle', el: dom.opponentStyle, type: 'select' },
+  { field: 'exploitMode', el: dom.exploitMode, type: 'checkbox' },
 ];
 
 // 只在"档位②·复杂判断"下生效的旋钮：其它档位时置灰，说明文字换成这句提示
@@ -182,6 +185,7 @@ function normalizeConfig(raw) {
   if (!OPPONENT_STYLE_OPTIONS.some((s) => s.id === cfg.opponentStyle)) cfg.opponentStyle = DEFAULT_OPPONENT_STYLE;
   cfg.enabled = Boolean(cfg.enabled);
   cfg.autoNextHand = Boolean(cfg.autoNextHand);
+  cfg.exploitMode = Boolean(cfg.exploitMode); // 剥削模式：只认 true/false
   return cfg;
 }
 
@@ -251,6 +255,12 @@ function renderConfigControls() {
     knob.select.disabled = !knobsOn;
     knob.desc.textContent = knobsOn ? knob.profile.desc : COMPLEX_ONLY_HINT;
   }
+
+  // 剥削模式开关：同样只在"复杂判断"档生效，其它档置灰并提示
+  dom.exploitMode.disabled = !knobsOn;
+  dom.exploitDesc.textContent = knobsOn
+    ? '开启后：面对多人池/河牌的下注更不易被吓退（对手这两种情况极少诈唬），且对手爱弃牌时多施压。'
+    : COMPLEX_ONLY_HINT;
 
   // 对手类型说明（选项里含"自动识别"）
   const style = OPPONENT_STYLE_OPTIONS.find((s) => s.id === cfg.opponentStyle);
@@ -477,6 +487,7 @@ function compute() {
     aggressionProfile: cfg.aggressionProfile,
     valueBetProfile: cfg.valueBetProfile,
     preflopEntryProfile: cfg.preflopEntryProfile,
+    exploitMode: cfg.exploitMode, // 剥削模式：针对线上对手 AI 的固定弱点
     opponentModel: state.opponentModel,
   });
   if (!decision.ok) {

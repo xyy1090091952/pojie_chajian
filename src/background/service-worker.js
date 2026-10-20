@@ -34,6 +34,14 @@ import {
 // 当前连接着的面板端口集合（面板可能开多个，用 Set 管理）
 const panelPorts = new Set();
 
+// 本手「诈唬计划」：跨多次决策记住"这手牌主动诈唬开了几枪"，用于执行「诈唬纪律」。
+//   - holeKey：本手底牌指纹，用来判断"是否换了一手牌"（换手就清零重来）。
+//   - barrels：本手已经真正打出去的"主动诈唬性下注"次数（持续开枪计数）。
+//   - lastBluffStreet：最后一次诈唬发生在第几街（调试/展示用）。
+//   放模块级变量即可：MV3 service worker 虽会休眠，但同一手牌的决策间隔很短、状态够用；
+//   万一后台被回收导致清零，最坏情况只是少约束一次诈唬，不影响安全。
+let handPlan = { holeKey: '', barrels: 0, lastBluffStreet: 0 };
+
 // 托管会话（状态/预告/历史/统计）。启动时先给一份空的，再从 session 存储里恢复。
 let session = createSession();
 const sessionStore = chrome.storage && chrome.storage.session;
@@ -130,7 +138,14 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
     // 1.5 托管执行了一个动作：记进历史和统计
     case RUNTIME_MESSAGE.AUTOPILOT_ACTED: {
-      updateSession((s) => applyActed(s, message.acted));
+      // 诈唬纪律：这次真正点下去的动作若是"主动诈唬性下注"，就给本手连续开枪数 +1，
+      //   下次决策时复杂档据此收枪（见 complex-strategy 的 bluffDisciplineOk）。
+      const acted = message.acted;
+      if (acted && acted.bluff) {
+        handPlan.barrels += 1;
+        if (Number.isFinite(acted.street)) handPlan.lastBluffStreet = acted.street;
+      }
+      updateSession((s) => applyActed(s, acted));
       return false;
     }
 
@@ -149,7 +164,16 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 function computeDecision(config) {
   const records = getAll(); // 全部抓包记录（既用于抽当前局面，也用于边打边记对手档案）
   const ctx = extractGameState(records); // 抽出"最新一帧"的局面
-  return decide(ctx, { ...config, records });
+
+  // 维护本手「诈唬计划」：底牌一换说明开新一手，连续开枪数清零。
+  //   holeKey 用两张底牌排序后拼成，顺序无关（防止同一手牌因读取顺序不同被误判为换手）。
+  const holeKey = Array.isArray(ctx.hole) ? [...ctx.hole].sort().join(',') : '';
+  if (holeKey && holeKey !== handPlan.holeKey) {
+    handPlan = { holeKey, barrels: 0, lastBluffStreet: 0 };
+  }
+
+  // 把诈唬计划随 config 传给决策引擎（复杂档据此执行「诈唬纪律」）。
+  return decide(ctx, { ...config, records, plan: handPlan });
 }
 
 // —— 2) 维护与面板的长连接 ——

@@ -520,6 +520,62 @@ export const BOARD_DANGER = {
   MAX_PENALTY: 20, // 多种威胁叠加时的上限，避免门槛被抬到离谱、把能跟的牌也全弃了。
 };
 
+// ============ 诈唬下注尺度·期望值择优（bet-sizing.js / complex-strategy.js 使用）============
+// 讲人话：诈唬的目的是"把对手吓到弃牌"。下得太小，对手花小钱就跟、吓不走；
+//   下得太大，万一被跟自己亏得也多。所以给几个候选尺度，用"期望收益(EV)"挑最划算的一个：
+//     EV = 对手弃牌概率 × 现在能赢的底池  −  对手跟注概率 × 这次要投入的筹码
+//   下注越大 → 对手越可能弃牌（吓退效果越好），但被跟时代价越高。EV 会自动在两者间找平衡，
+//   并且在 EV 打平时优先选更大的尺度（更有压迫力，正是用户要的"要够大才吓得走"）。
+export const BLUFF_EV = {
+  // 候选"占底池比例"（从小到大）。择优时在这几个里挑 EV 最高的。
+  //   最高放到 1.0（满池）——这样在面对爱弃牌的对手时，能自动选出真正有压迫力的大注。
+  RATIO_CANDIDATES: [0.5, 0.66, 0.8, 1.0],
+  // 对手面对"半池"诈唬时的基准弃牌概率 = 这个基准 × 对手诈唬敏感度(bluffBias)。
+  //   bluffBias 越高（对手偏紧弱、爱弃牌）基准越高；再按下注大小线性调整。
+  FOLD_AT_HALF_POT_BASE: 0.5,
+  // 下注每比"半池"大/小 1.0 个底池，弃牌概率就加/减这么多（下得越大越容易吓走）。
+  FOLD_SLOPE_PER_POT: 0.25,
+  // 弃牌概率的上下限（下得再大也不可能 100% 弃，再小也总有人会放弃）。
+  FOLD_MIN: 0.05,
+  FOLD_MAX: 0.92,
+};
+
+// ============ 剥削模式（complex-strategy.js 使用，专门针对线上 AI 对手的弱点）============
+// 讲人话：线上那个 AI 对手有几个固定毛病——
+//   ① 它翻后基本只在"单挑 / 没被我加注"时才诈唬；一旦是多人池、或我加注过它，它还下注，多半是真牌；
+//   ② 它连续两三条街下注(persistent barrel)基本都有成手，尤其河牌极少诈唬；
+//   ③ 它示弱（过牌、下小注）时很容易被偷池。
+// 「剥削模式」= 把这些弱点变成我方的针对性调整（只在面板打开开关、且用复杂判断档时才生效）：
+//   - 面对它的下注更"尊重"（多人池 / 河牌加跟注门槛，非强牌别乱追）；
+//   - 它示弱时我方更敢偷：诈唬更频繁、尺度更大；
+//   - 我方听牌的隐含赔率打折（它下注=价值，我追牌成了也赢不回那么多）。
+// ⚠️ 全是"温和旋钮"，不改策略主干；关掉开关立即恢复常规打法，互不污染。
+export const EXPLOIT = {
+  MULTIWAY_BET_PENALTY: 6, // 多人池(≥2 对手)里对手还下注≈真牌：非强牌跟注门槛额外 +6 点
+  BARREL_RIVER_PENALTY: 5, // 河牌对手仍下注≈价值(它极少河牌诈唬)：非强牌门槛再 +5 点
+  BLUFF_BIAS_BOOST: 1.3, // 它示弱易被偷：诈唬/试探注时把"对手弃牌率"放大 1.3 倍(等效下更大/更敢偷)
+  PROBE_FREQUENCY: 0.85, // 剥削模式下单挑试探注更频繁(常规 0.6 → 0.85)，抓它过牌示弱
+  IMPLIED_CREDIT_MULT: 0.5, // 它下注=价值，我方听牌隐含赔率让分打 5 折(别高估追牌的回报)
+};
+
+// 剥削模式默认值：默认【关闭】。它是针对"这一桌就是那个线上 AI"的专项打法，
+//   普通对手场合不该开，所以默认关，交给用户在面板显式打开。
+export const DEFAULT_EXPLOIT_MODE = false;
+
+// ============ 诈唬纪律（complex-strategy.js 使用，移植自线上 AI 的优点）============
+// 讲人话：我们参照的那个线上 AI 有个很"职业"的优点——它连续两三条街下注(持续开枪/barrel)
+//   基本都有牌力支撑，尤其河牌极少空枪诈唬(bluff)。这正是业余玩家最常犯的错：第一枪没中就
+//   第二枪、第三枪硬吹，被对手逮住反加就血亏。
+// 「诈唬纪律」= 给我方的主动诈唬(半诈唬 / 试探注)上一道闸：
+//   ① 一手牌里主动诈唬最多开 MAX_BARRELS 枪，再往后不许空枪硬吹；
+//   ② 从第二枪起，必须手里有听牌或成手"支撑"，纯空气不许续攻；
+//   ③ 河牌诈唬必须有支撑（把"河牌极少空枪"这条纪律落到实处）。
+// ⚠️ 只约束"主动诈唬性下注"，价值下注(拿着好牌要钱)完全不受影响。
+export const BARREL = {
+  MAX_BARRELS: 2, // 一手牌主动诈唬的开枪上限：最多 1 次持续下注 + 1 次有支撑的续攻
+  RIVER_NEEDS_SUPPORT: true, // 河牌诈唬必须有牌力/听牌支撑（听牌到河牌已成或落空，故河牌基本=要有成手）
+};
+
 // 托管运行参数：集中管理"自动打牌"的节奏与安全阀。
 export const AUTOPILOT = {
   // 托管总开关的默认值：默认【关闭】。必须用户在面板上手动打开才会自动动作，
@@ -681,6 +737,7 @@ export const STORAGE_KEYS = {
   AGGRESSION_PROFILE: 'autopilot_aggression_profile', // 整体打法：稳健/均衡/激进
   VALUE_BET_PROFILE: 'autopilot_value_bet_profile', // 大牌下注：标准/强势/最大化
   PREFLOP_ENTRY_PROFILE: 'autopilot_preflop_entry_profile', // 入池意愿：标准/积极/很积极
+  EXPLOIT_MODE: 'autopilot_exploit_mode', // 剥削模式开关（true/false）：针对线上 AI 弱点的专项打法
   AUTO_NEXT_HAND: 'autopilot_auto_next_hand', // 房主：自动开始下一手（true/false）
 };
 
@@ -693,6 +750,7 @@ export const AUTOPILOT_CONFIG_FIELDS = [
   { field: 'aggressionProfile', key: STORAGE_KEYS.AGGRESSION_PROFILE, fallback: DEFAULT_AGGRESSION_PROFILE },
   { field: 'valueBetProfile', key: STORAGE_KEYS.VALUE_BET_PROFILE, fallback: DEFAULT_VALUE_BET_PROFILE },
   { field: 'preflopEntryProfile', key: STORAGE_KEYS.PREFLOP_ENTRY_PROFILE, fallback: DEFAULT_PREFLOP_ENTRY_PROFILE },
+  { field: 'exploitMode', key: STORAGE_KEYS.EXPLOIT_MODE, fallback: DEFAULT_EXPLOIT_MODE },
   { field: 'autoNextHand', key: STORAGE_KEYS.AUTO_NEXT_HAND, fallback: AUTOPILOT.AUTO_NEXT_HAND },
 ];
 

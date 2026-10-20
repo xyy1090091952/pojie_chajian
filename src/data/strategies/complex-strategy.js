@@ -32,13 +32,15 @@ import {
   getValueBetProfile,
   getPreflopEntryProfile,
   BOARD_DANGER,
+  EXPLOIT,
+  BARREL,
 } from '../../common/constants.js';
 import { potOdds } from '../equity-engine.js';
 import { detectDraws, analyzeBoardTexture, BOARD_TEXTURE } from '../poker-engine.js';
 import { handStrength } from '../hand-range.js';
 // 成手分级 / 听牌强弱：和"对手范围估算"共用同一套规则（见 hand-class.js），保证口径一致。
 import { MADE, MADE_LABEL, DRAW, classifyMade, drawStrength } from '../hand-class.js';
-import { SIZE_STRENGTH } from '../bet-sizing.js';
+import { SIZE_STRENGTH, pickBluffRatioByEV } from '../bet-sizing.js';
 
 // ======================= 翻牌前参数 =======================
 // 开池门槛（Chen 分 ≥ 这个值才主动开池加注）。分越高牌越好：AA=20、KK=16、AKs=12、TT=10、99=9、88=8、66=6。
@@ -114,6 +116,42 @@ const POSITION_MARGIN_SHIFT = { late: -2, middle: 0, early: 2 };
 /** 动作结果的快捷构造，统一字段，减少各分支手写对象。 */
 function act(action, reason, sizing) {
   return sizing ? { action, reason, sizing } : { action, reason };
+}
+
+/**
+ * 诈唬性下注结果：在 act 基础上打一个 bluff:true 标记。
+ *   作用：让后台(service-worker)在这次动作真正点下去后，把本手的"连续开枪数"加一，
+ *   下次决策时据此执行「诈唬纪律」(见 bluffDisciplineOk)。价值下注不走这里、不会被计数。
+ */
+function actBluff(action, reason, sizing) {
+  return { ...act(action, reason, sizing), bluff: true };
+}
+
+/**
+ * 「诈唬纪律」闸门：决定这一次"主动诈唬性下注"是否放行。
+ *   移植自线上 AI 的优点——它连续开枪(barrel)基本都有牌力支撑，河牌极少空枪硬吹。
+ *   这里把这条纪律落到我方：少打那种"第一枪没中就硬吹第二三枪"被反加血亏的空气牌。
+ * @param {object} plan 本手诈唬计划 {barrels,...}；barrels=本手已开过的诈唬枪数
+ * @param {object} p
+ *   @param {boolean} p.isRiver    是否河牌
+ *   @param {boolean} p.hasSupport 手里有没有"支撑"(任意听牌或任意成手；纯空气=无)
+ * @returns {{ok:boolean, note:string}} ok=放行诈唬；note=被拦原因(写进过牌理由便于复盘)
+ */
+function bluffDisciplineOk(plan, { isRiver, hasSupport }) {
+  const barrels = Math.max(0, Number(plan && plan.barrels) || 0);
+  // ① 开枪已达上限：收枪，不再空枪硬吹。
+  if (barrels >= BARREL.MAX_BARRELS) {
+    return { ok: false, note: `本手诈唬已连开 ${barrels} 枪达上限` };
+  }
+  // ② 第二枪起必须有支撑(听牌/成手)；纯空气不许续攻。
+  if (barrels >= 1 && !hasSupport) {
+    return { ok: false, note: '续攻无听牌/成手支撑' };
+  }
+  // ③ 河牌诈唬必须有支撑(落实"河牌极少空枪"这条纪律)。
+  if (isRiver && BARREL.RIVER_NEEDS_SUPPORT && !hasSupport) {
+    return { ok: false, note: '河牌无成手支撑' };
+  }
+  return { ok: true, note: '' };
 }
 
 /** 拿到底池赔率百分比（拿不到数据当作很贵 100%）。 */
@@ -319,7 +357,7 @@ function decidePreflop(ctx, knobs) {
 
 // ======================= 翻牌后 =======================
 function decidePostflop(ctx, eq, knobs, rng) {
-  const { profile, aggression, valueBet } = knobs;
+  const { profile, aggression, valueBet, exploitMode, plan } = knobs;
   const equity = eq.equity;
   const pot = Number(ctx.pot) || 0;
   const toCall = Number(ctx.toCall) || 0;
@@ -347,6 +385,26 @@ function decidePostflop(ctx, eq, knobs, rng) {
   const bluffMult = Number(aggression.bluffSizeMult) || 1;
   const isStrongMade = made === MADE.MONSTER || made === MADE.STRONG;
   const madeText = MADE_LABEL[made];
+
+  // 诈唬「支撑」：手里有任意成手(哪怕小对子)或任意听牌，就算有支撑；纯空气牌=无支撑。
+  //   「诈唬纪律」据此判断第二枪/河牌诈唬能不能续攻（见 bluffDisciplineOk）。
+  const hasSupport = made !== MADE.NONE || draw !== DRAW.NONE;
+
+  // 诈唬/试探注的"尺度"：先用期望值(EV)在几个候选里挑一个"够大到能吓退对手"的比例，
+  //   再乘牌面湿度(extraMult)与打法倾向(bluffMult)微调。放在这里统一出口，A4 半诈唬 / A6 试探注共用。
+  //   fold 率近似用对手"诈唬敏感度"bluffBias：对手越爱弃牌，就越敢、越该下大注偷池。
+  //   剥削模式下：线上 AI 示弱时极易被偷，所以把它的弃牌率再放大一档（等效敢下更大的注）。
+  const exploitBluffBias = exploitMode ? profile.bluffBias * EXPLOIT.BLUFF_BIAS_BOOST : profile.bluffBias;
+  const bluffRatio = (extraMult = 1) => {
+    const pick = pickBluffRatioByEV({
+      pot: Number(ctx.pot) || 0,
+      heroBet: Number(ctx.heroBet) || 0,
+      maxBet: Math.max(Number(ctx.maxBet) || 0, Number(ctx.heroBet) || 0),
+      toCall: 0, // A 分支是"无人下注"场景，不用跟注
+      bluffBias: exploitBluffBias,
+    });
+    return pick.ratio * extraMult * bluffMult;
+  };
 
   // 价值下注的尺度：超强/强牌乘"大牌下注"倍数与松桌倍数，河牌用河牌比例。
   const valueSizing = () => {
@@ -378,10 +436,16 @@ function decidePostflop(ctx, eq, knobs, rng) {
       });
     }
     // A4 强听牌半诈唬：对手少、桌风允许诈唬、还有牌可补。下得够大才能逼对手弃牌。
+    //   尺度交给 EV 择优（bluffRatio）：对手越爱弃牌越敢打大注，湿面再放大一点收压迫力。
+    //   ⚠️ 先过「诈唬纪律」：开枪数达上限时收枪改过牌（别空枪硬吹被反加）。强听牌本身就是支撑。
     if (draw === DRAW.STRONG && opponents <= SEMI_BLUFF_MAX_OPP && allowBluff) {
-      return act(POKER_ACTION.RAISE, `强听牌半诈唬（对手弃牌就赢、成牌赢大池）`, {
-        kind: 'pot', ratio: RATIO.SEMI_BLUFF * textureMult * bluffMult, strength: SIZE_STRENGTH.NORMAL,
-      });
+      const gate = bluffDisciplineOk(plan, { isRiver, hasSupport });
+      if (gate.ok) {
+        return actBluff(POKER_ACTION.RAISE, `强听牌半诈唬（对手弃牌就赢、成牌赢大池）`, {
+          kind: 'pot', ratio: bluffRatio(textureMult), strength: SIZE_STRENGTH.NORMAL,
+        });
+      }
+      return act(POKER_ACTION.CHECK, `有强听牌但诈唬纪律限制（${gate.note}），改过牌看牌。`);
     }
     // A5 湿面保护：胜率中上、还有牌要发 => 下注别让对手免费补牌。
     if (!isRiver && wet && made !== MADE.NONE && equity >= fairShare + PROTECT_EDGE + tightness) {
@@ -390,10 +454,18 @@ function decidePostflop(ctx, eq, knobs, rng) {
       });
     }
     // A6 单挑试探注（相当于持续下注/探池）：干/中性牌面、胜率不差，下够大才逼得走没中的牌。
-    if (!isRiver && opponents === 1 && allowBluff && !wet && equity >= PROBE_MIN_EQUITY && rng() < PROBE_FREQUENCY) {
-      return act(POKER_ACTION.RAISE, `单挑、牌面不湿、胜率 ${equity}%，下注试探（对手没中多半会弃）`, {
-        kind: 'pot', ratio: RATIO.PROBE * bluffMult, strength: SIZE_STRENGTH.NORMAL,
-      });
+    //   尺度同样用 EV 择优，确保"够大到能吓退"，而不是写死一个小比例。
+    //   剥削模式下：线上 AI 单挑示弱很好偷，所以提高试探注频率(常规 0.6 → 0.85)。
+    const probeFreq = exploitMode ? EXPLOIT.PROBE_FREQUENCY : PROBE_FREQUENCY;
+    if (!isRiver && opponents === 1 && allowBluff && !wet && equity >= PROBE_MIN_EQUITY && rng() < probeFreq) {
+      // ⚠️ 试探注也是主动诈唬，先过「诈唬纪律」：连开枪达上限或续攻无支撑时收枪改过牌。
+      const gate = bluffDisciplineOk(plan, { isRiver, hasSupport });
+      if (gate.ok) {
+        return actBluff(POKER_ACTION.RAISE, `单挑、牌面不湿、胜率 ${equity}%，下注试探（对手没中多半会弃）`, {
+          kind: 'pot', ratio: bluffRatio(), strength: SIZE_STRENGTH.NORMAL,
+        });
+      }
+      return act(POKER_ACTION.CHECK, `本可试探注但诈唬纪律限制（${gate.note}），改过牌看牌。`);
     }
     return act(POKER_ACTION.CHECK, `可免费过牌，胜率 ${equity}%（${madeText}）不够下注，过牌。`);
   }
@@ -403,9 +475,18 @@ function decidePostflop(ctx, eq, knobs, rng) {
   const multiway = Math.max(0, opponents - 1) * MULTIWAY_CALL_PENALTY;
   // 危险牌面（成同花/成顺/公对）：只对"非强牌"加跟注门槛，强牌不受影响、照常跟/加。
   const danger = isStrongMade ? { penalty: 0, note: '' } : dangerPenalty(texture, street);
-  const required = breakeven + multiway + tightness + danger.penalty;
+  // 剥削模式：线上 AI 的下注在"多人池"和"河牌"上几乎都是真牌（它极少在这两种场合诈唬）。
+  //   所以非强牌面对它的下注要更尊重——额外抬高跟注门槛，少被它的价值注骗着追。强牌不受影响。
+  let exploitPenalty = 0;
+  const exploitHits = [];
+  if (exploitMode && !isStrongMade) {
+    if (opponents >= 2) { exploitPenalty += EXPLOIT.MULTIWAY_BET_PENALTY; exploitHits.push('多人池'); }
+    if (isRiver) { exploitPenalty += EXPLOIT.BARREL_RIVER_PENALTY; exploitHits.push('河牌'); }
+  }
+  const exploitText = exploitHits.length ? `，剥削(${exploitHits.join('/')})门槛+${exploitPenalty}` : '';
+  const required = breakeven + multiway + tightness + danger.penalty + exploitPenalty;
   const reqText = Math.round(required);
-  const dangerText = danger.note ? `，${danger.note}` : '';
+  const dangerText = (danger.note ? `，${danger.note}` : '') + exploitText;
 
   // B1 强成手 + 胜率远超回本线 => 加注（价值加注 / 过牌加注）。
   if (isStrongMade && equity >= breakeven + RAISE_EDGE && equity >= fairShare + VALUE_EDGE) {
@@ -420,8 +501,10 @@ function decidePostflop(ctx, eq, knobs, rng) {
     return act(POKER_ACTION.CALL, `胜率 ${equity}% ≥ 门槛 ${reqText}%（${madeText}${dangerText}），跟注划算。`);
   }
   // B3 强听牌 + 筹码够深 => 靠隐含赔率跟注。
+  //   剥削模式：它下注=价值，追牌成了也赢不回那么多（没什么隐含赔率），所以让分打折。
   const impliedOk = !hasStack || toCall <= stack * IMPLIED_MAX_STACK_RATIO;
-  if (draw === DRAW.STRONG && impliedOk && equity >= required - IMPLIED_ODDS_CREDIT) {
+  const impliedCredit = exploitMode ? IMPLIED_ODDS_CREDIT * EXPLOIT.IMPLIED_CREDIT_MULT : IMPLIED_ODDS_CREDIT;
+  if (draw === DRAW.STRONG && impliedOk && equity >= required - impliedCredit) {
     return act(POKER_ACTION.CALL, `胜率 ${equity}% 略低于门槛 ${reqText}%，但有强听牌、筹码够深，跟注博成牌。`);
   }
   // B4 其余 => 弃牌。
@@ -456,6 +539,8 @@ export function decide({
   aggressionProfile,
   valueBetProfile,
   preflopEntryProfile,
+  exploitMode = false,
+  plan = null,
   rng = Math.random,
 }) {
   const entryConf = getPreflopEntryProfile(preflopEntryProfile);
@@ -465,6 +550,8 @@ export function decide({
     valueBet: getValueBetProfile(valueBetProfile).decision,
     entry: entryConf.decision, // 翻牌前「便宜看翻牌」的门槛
     entryLabel: entryConf.label, // 写进决策理由，让你知道是哪个设置起的作用
+    exploitMode: Boolean(exploitMode), // 剥削模式：针对线上 AI 弱点的专项调整（只翻牌后用到）
+    plan: plan || {}, // 本手诈唬计划(连续开枪数等)，由后台跨 tick 维护，用于「诈唬纪律」
   };
   const board = Array.isArray(ctx.board) ? ctx.board : [];
 

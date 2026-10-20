@@ -31,6 +31,7 @@ import {
   DEFAULT_AGGRESSION_PROFILE,
   DEFAULT_VALUE_BET_PROFILE,
   DEFAULT_PREFLOP_ENTRY_PROFILE,
+  DEFAULT_EXPLOIT_MODE,
   NEXT_HAND_ACTION,
 } from '../../common/constants.js';
 import { isMyTurn } from './turn-detector.js';
@@ -49,6 +50,7 @@ const state = {
   aggressionProfile: DEFAULT_AGGRESSION_PROFILE, // 整体打法倾向
   valueBetProfile: DEFAULT_VALUE_BET_PROFILE, // 大牌价值下注力度
   preflopEntryProfile: DEFAULT_PREFLOP_ENTRY_PROFILE, // 翻牌前入池意愿（便宜时差牌要不要看翻牌）
+  exploitMode: DEFAULT_EXPLOIT_MODE, // 剥削模式：针对线上对手 AI 的固定弱点（只在复杂档生效）
   autoNextHand: AUTOPILOT.AUTO_NEXT_HAND, // 房主：是否自动开始下一手
   timer: null, // 轮询定时器句柄
   busy: false, // 正在处理一次行动（防止重入）
@@ -229,6 +231,7 @@ function requestDecision() {
             aggressionProfile: state.aggressionProfile,
             valueBetProfile: state.valueBetProfile,
             preflopEntryProfile: state.preflopEntryProfile,
+            exploitMode: state.exploitMode, // 剥削模式：针对线上对手 AI 的固定弱点
           },
         },
         (resp) => {
@@ -291,6 +294,9 @@ function reportActed(result, decision) {
       toCall: Number(decision.toCall) || 0,
       // 执行层可能把动作改掉（如弃牌改过牌），只有最终仍是加注/跟注时才保留"全下"标记
       allIn: !!decision.allIn && result.action === decision.action,
+      // 诈唬标记：仅当本次决策是"主动诈唬性下注"、且执行层确实照原动作点了下去，才算真开一枪。
+      //   后台据此累加本手连续开枪数（诈唬纪律）。
+      bluff: !!decision.bluff && result.action === decision.action,
       reason: result.reason,
       tier: decision.tier,
       equity: decision.equity ? decision.equity.equity : null,

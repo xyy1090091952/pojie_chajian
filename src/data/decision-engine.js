@@ -145,6 +145,8 @@ export function decide(ctx, config = {}) {
     aggressionProfile,
     valueBetProfile,
     preflopEntryProfile,
+    exploitMode: Boolean(config.exploitMode), // 剥削模式开关：针对线上 AI 弱点的专项调整（见 complex-strategy）
+    plan: config.plan || {}, // 本手诈唬计划(连续开枪数)，后台跨 tick 维护，用于「诈唬纪律」
     rng: config.rng,
   });
 
@@ -153,6 +155,9 @@ export function decide(ctx, config = {}) {
   if (final.action === POKER_ACTION.RAISE) {
     final = finalizeRaise(ctx, eq, result, valueBetProfile);
   }
+  // 诈唬标记：策略把"主动诈唬性下注"标了 bluff=true；只有最终仍是加注/下注才算真开了一枪，
+  //   被降级成跟注/过牌(finalizeRaise 可能降级)就不算。后台据此累加本手"连续开枪数"。
+  const bluff = Boolean(result.bluff) && final.action === POKER_ACTION.RAISE;
   // 跟注时如果要跟的钱 ≥ 剩余筹码，实际就是跟注全下，标出来方便你在面板一眼看到。
   const stack = Number(ctx.stack);
   if (final.action === POKER_ACTION.CALL && Number.isFinite(stack) && stack > 0 && ctx.toCall >= stack) {
@@ -165,6 +170,7 @@ export function decide(ctx, config = {}) {
     action: final.action,
     amount: final.amount,
     allIn: final.allIn,
+    bluff, // 本次是否为"主动诈唬性下注"：后台用它累加本手连续开枪数（诈唬纪律）
     minRaiseTo: ctx.minRaiseTo ?? null,
     maxRaiseTo: ctx.maxRaiseTo ?? null,
     toCall: Number(ctx.toCall) || 0, // 要跟的钱（执行层记录跟注金额用）

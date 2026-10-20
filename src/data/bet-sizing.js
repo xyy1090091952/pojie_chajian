@@ -18,7 +18,7 @@
  * 纯函数、无副作用，便于单测。
  */
 
-import { SIZING } from '../common/constants.js';
+import { SIZING, BLUFF_EV } from '../common/constants.js';
 
 // 牌力档常量：策略层和这里共用同一套字符串，避免拼错。
 export const SIZE_STRENGTH = {
@@ -115,6 +115,69 @@ function rawRaiseTo(base, sizing, position) {
       return base.maxBet + ratio * (base.pot + base.toCall);
     }
   }
+}
+
+/**
+ * 【对外】诈唬/半诈唬下注：按"期望收益(EV)"从几个候选尺度里挑最划算的那一个。
+ * ------------------------------------------------------------
+ * 讲人话：诈唬的唯一目的是"把对手吓到弃牌"。
+ *   - 下太小：对手花小钱就跟，吓不走，纯亏；
+ *   - 下太大：被跟时自己亏得也多。
+ *   所以这里给几个候选比例，用这条公式给每个比例算一个 EV，挑最高的：
+ *     EV = P(对手弃牌) × 现在能赢的底池  −  P(对手跟注) × 这次要新投入的筹码
+ *   其中"对手弃牌概率"随下注变大而升高（下得越狠越容易吓走），公式会自动在
+ *   "吓退效果"和"被跟代价"之间找平衡；EV 打平时优先选更大的尺度（更有压迫力）。
+ *
+ * 为什么放在数据层而不是策略层：这是"把意图换算成尺度"的纯计算，和 resolveRaiseTo 同属一层，
+ *   策略层只负责"决定要不要诈唬"，具体打多大交给这里统一口径，便于单测与复用。
+ *
+ * @param {object} p
+ *   @param {number}   p.pot        当前底池（诈唬成功时赢到的钱，近似用它）
+ *   @param {number}   p.heroBet    我本轮已下注额（用来算"新投入 = 加注至 − 已下"）
+ *   @param {number}   p.maxBet     当前最高注（算加注至要用）
+ *   @param {number}   p.toCall     我还要跟的钱（面对下注时 >0；无人下注时 0）
+ *   @param {number}   p.bluffBias  对手"诈唬敏感度"：>1 爱弃牌(诈唬易成功)，<1 爱跟注
+ *   @param {number[]} [p.candidates] 候选"占底池比例"（默认用 BLUFF_EV.RATIO_CANDIDATES）
+ * @returns {{ratio:number, foldProb:number, ev:number}} 选中的比例 + 估计弃牌率 + 该比例的 EV
+ */
+export function pickBluffRatioByEV({ pot, heroBet, maxBet, toCall, bluffBias, candidates }) {
+  const list = Array.isArray(candidates) && candidates.length ? candidates : BLUFF_EV.RATIO_CANDIDATES;
+  const safePot = Math.max(1, Number(pot) || 0); // 防 0 除、也避免底池为 0 时 EV 全 0
+  const safeToCall = Math.max(0, Number(toCall) || 0);
+  const safeMaxBet = Math.max(0, Number(maxBet) || 0);
+  const safeHeroBet = Math.max(0, Number(heroBet) || 0);
+  // 对手弃牌基准：紧弱爱弃牌的对手(bluffBias 高)基准更高，夹到合理区间。
+  const base = clamp01(BLUFF_EV.FOLD_AT_HALF_POT_BASE * (Number(bluffBias) || 1));
+
+  let best = null;
+  for (const ratio of list) {
+    // 这个比例换算出的"加注至"与"新投入筹码"（和 rawRaiseTo 的 pot 口径一致）。
+    const raiseTo = safeMaxBet + ratio * (safePot + safeToCall);
+    const invest = Math.max(0, raiseTo - safeHeroBet); // 这次真正要掏出去的钱
+    // 弃牌概率：以"半池"为基准，每比半池大 1 个底池就加 FOLD_SLOPE，夹到上下限。
+    const foldProb = clampFold(base + (ratio - 0.5) * BLUFF_EV.FOLD_SLOPE_PER_POT);
+    // EV：吓走对手赢下底池 vs 被跟付出 invest。
+    const ev = foldProb * safePot - (1 - foldProb) * invest;
+    // 取 EV 最大者；EV 几乎相等(差距 < 0.5%底池)时选更大的 ratio（更有压迫力）。
+    if (
+      !best ||
+      ev > best.ev + safePot * 0.005 ||
+      (Math.abs(ev - best.ev) <= safePot * 0.005 && ratio > best.ratio)
+    ) {
+      best = { ratio, foldProb, ev };
+    }
+  }
+  return best || { ratio: list[0], foldProb: base, ev: 0 };
+}
+
+/** 把值夹到 [0,1]。 */
+function clamp01(v) {
+  return Math.min(1, Math.max(0, Number(v) || 0));
+}
+
+/** 把弃牌概率夹到配置的上下限。 */
+function clampFold(v) {
+  return Math.min(BLUFF_EV.FOLD_MAX, Math.max(BLUFF_EV.FOLD_MIN, Number(v) || 0));
 }
 
 /**

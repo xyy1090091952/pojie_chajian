@@ -186,6 +186,19 @@
       <!-- 一行状态：此刻实际按哪种对手在算（自动识别时显示观察进度） -->
       <p id="oppStatus" class="opp-status"></p>
 
+      <!-- 剥削模式：针对"线上对手 AI"的固定弱点做温和加码（只在复杂档生效） -->
+      <div class="field field--switch">
+        <label for="exploitMode" class="field__label">
+          剥削模式
+          <span class="field__hint">（专打对手弱点：多人池/河牌它很少诈唬，就少被它吓到；它爱弃牌时多施压）</span>
+        </label>
+        <label class="switch">
+          <input type="checkbox" id="exploitMode" />
+          <span class="switch__slider"></span>
+        </label>
+      </div>
+      <p id="exploitDesc" class="field__desc"></p>
+
       <!-- 其它 -->
       <h3 class="settings__group">其它</h3>
       <div class="field field--switch">
